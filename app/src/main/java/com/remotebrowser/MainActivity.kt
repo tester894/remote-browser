@@ -38,7 +38,7 @@ class MainActivity : Activity() {
     private val SERVER_URL = "wss://jp.serveirc.com/remote/"
 
     // スクショ送信間隔(ms)
-    private val CAPTURE_INTERVAL = 500L
+    private val CAPTURE_INTERVAL = 400L
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -136,6 +136,9 @@ class MainActivity : Activity() {
                 webView.evaluateJavascript("window.scrollBy(0, $dy);", null)
             }
         }
+        // 操作の結果をすぐ画面に反映させるため、少し待って即キャプチャ
+        // (定期送信=400msを待たずに反応が見えるので操作感が上がる)
+        handler.postDelayed({ captureAndSend() }, 90)
     }
 
     // JavaScript経由でタップをシミュレート
