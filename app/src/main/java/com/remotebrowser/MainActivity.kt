@@ -20,10 +20,18 @@ class MainActivity : Activity() {
     private lateinit var webView: WebView
     private var ws: WebSocket? = null
     private val handler = Handler(Looper.getMainLooper())
-    private val deviceId = UUID.randomUUID().toString().take(8)
+
+    // 端末固定ID: ANDROID_ID を使うことで再起動しても同じIDになり、
+    // 管理画面側で付けた名前が保持される(取得失敗時のみランダム)
+    private val deviceId: String by lazy {
+        val aid = try {
+            Settings.Secure.getString(contentResolver, Settings.Secure.ANDROID_ID)
+        } catch (e: Exception) { null }
+        (aid ?: UUID.randomUUID().toString()).take(8)
+    }
 
     // ---- サーバー設定 ----
-    private val SERVER_URL = "wss://jp.serveirc.com/remote"
+    private val SERVER_URL = "wss://jp.serveirc.com/remote/"
 
     // スクショ送信間隔(ms)
     private val CAPTURE_INTERVAL = 500L
@@ -123,13 +131,20 @@ class MainActivity : Activity() {
                 val text = msg.getString("text")
                 injectText(text)
             }
+            "key" -> {
+                val key = msg.optString("key")
+                if (key == "Enter") pressEnter()
+            }
             "scroll" -> {
-                val direction = msg.getString("direction")
-                val distance = 500
-                when (direction) {
-                    "up" -> webView.scrollBy(0, -distance)
-                    "down" -> webView.scrollBy(0, distance)
+                // dy 指定(ホイール)を優先、無ければ direction(上下ボタン)で ±500
+                val dy = if (msg.has("dy")) msg.getInt("dy") else {
+                    if (msg.optString("direction") == "up") -500 else 500
                 }
+                // window とタップ地点の要素の両方をスクロールし、
+                // ページ内スクロールコンテナにも効くようにする
+                webView.evaluateJavascript(
+                    "window.scrollBy(0, $dy);", null
+                )
             }
         }
     }
@@ -144,37 +159,62 @@ class MainActivity : Activity() {
         webView.evaluateJavascript("""
             (function() {
                 var el = document.elementFromPoint($cssX, $cssY);
-                if (el) {
+                if (!el) return;
+                // クリック相当のマウスイベントを順に発火(タップに近い挙動)
+                ['mousedown','mouseup','click'].forEach(function(t){
+                    el.dispatchEvent(new MouseEvent(t, {bubbles:true, cancelable:true, view:window, clientX:$cssX, clientY:$cssY}));
+                });
+                if (typeof el.focus === 'function') el.focus();
+                // 入力欄はスクロールで見える位置へ
+                if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable) {
                     el.focus();
-                    el.click();
-                    // input/textarea/select ならフォーカスを確実に
-                    if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT') {
-                        el.focus();
-                    }
                 }
             })();
         """, null)
     }
 
-    // JavaScriptでテキスト入力
+    // JavaScriptでテキスト入力(input/textarea/contenteditable 対応)
     private fun injectText(text: String) {
         val escaped = text.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n")
         webView.evaluateJavascript("""
             (function() {
                 var el = document.activeElement;
-                if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')) {
-                    var nativeSetter = Object.getOwnPropertyDescriptor(
-                        window.HTMLInputElement.prototype, 'value'
-                    ) || Object.getOwnPropertyDescriptor(
-                        window.HTMLTextAreaElement.prototype, 'value'
-                    );
-                    if (nativeSetter && nativeSetter.set) {
-                        nativeSetter.set.call(el, '$escaped');
+                if (!el) return;
+                var tag = el.tagName;
+                if (tag === 'INPUT' || tag === 'TEXTAREA') {
+                    var proto = (tag === 'TEXTAREA')
+                        ? window.HTMLTextAreaElement.prototype
+                        : window.HTMLInputElement.prototype;
+                    var setter = Object.getOwnPropertyDescriptor(proto, 'value');
+                    if (setter && setter.set) {
+                        setter.set.call(el, '$escaped');
                     } else {
                         el.value = '$escaped';
                     }
                     el.dispatchEvent(new Event('input', { bubbles: true }));
                     el.dispatchEvent(new Event('change', { bubbles: true }));
+                } else if (el.isContentEditable) {
+                    el.textContent = '$escaped';
+                    el.dispatchEvent(new Event('input', { bubbles: true }));
+                }
+            })();
+        """, null)
+    }
+
+    // Enter キー送出(検索確定・フォーム送信)
+    private fun pressEnter() {
+        webView.evaluateJavascript("""
+            (function() {
+                var el = document.activeElement;
+                if (!el) return;
+                ['keydown','keypress','keyup'].forEach(function(t){
+                    el.dispatchEvent(new KeyboardEvent(t, {key:'Enter', code:'Enter', keyCode:13, which:13, bubbles:true, cancelable:true}));
+                });
+                if (el.form) {
+                    try {
+                        if (el.form.requestSubmit) el.form.requestSubmit();
+                        else el.form.submit();
+                    } catch(e){}
                 }
             })();
         """, null)
@@ -192,6 +232,7 @@ class MainActivity : Activity() {
 
     private fun captureAndSend() {
         if (ws == null) return
+        if (webView.width <= 0 || webView.height <= 0) return
         // WebView の描画をビットマップにキャプチャ
         val bitmap = Bitmap.createBitmap(webView.width, webView.height, Bitmap.Config.ARGB_8888)
         val canvas = android.graphics.Canvas(bitmap)
