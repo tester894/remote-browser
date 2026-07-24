@@ -279,7 +279,7 @@ class MainActivity : Activity() {
                 .replace(Regex("Version/\\d+\\.\\d+\\s*"), "")
 
             webViewClient = object : WebViewClient() {
-                override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.drawable.Drawable?) {
+                override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                     super.onPageStarted(view, url, favicon)
                     // ページのJSより先にChromeプロパティを偽装
                     view?.evaluateJavascript(CHROME_SPOOF_JS, null)
