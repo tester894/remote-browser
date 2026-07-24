@@ -46,31 +46,23 @@ class MainActivity : Activity() {
     // 端末ごとの自然な差異を残すことで、全ユーザーが同一FPになるのを防ぐ。
     private val CHROME_SPOOF_JS = """
         (function(){
-            // Function.prototype.toString偽装: chrome.*の関数がnativeに見えるように
-            var sp=new WeakSet(),nm=new WeakMap(),ot=Function.prototype.toString;
-            function mk(fn,name){sp.add(fn);nm.set(fn,name);return fn}
-            Function.prototype.toString=function(){
-                if(sp.has(this))return'function '+nm.get(this)+'() { [native code] }';
-                return ot.call(this);
-            };
-            sp.add(Function.prototype.toString);nm.set(Function.prototype.toString,'toString');
-
             // window.chrome オブジェクト(WebViewには不在→Chromeと判定される最大の要因)
+            // Function.prototype.toStringは触らない(パッチ検出スコアが跳ね上がるため)
             if(!window.chrome){
                 window.chrome={
                     runtime:{id:undefined,
-                        connect:mk(function(){},'connect'),
-                        sendMessage:mk(function(){},'sendMessage'),
-                        onMessage:{addListener:mk(function(){},'addListener'),removeListener:mk(function(){},'removeListener'),hasListeners:mk(function(){return false},'hasListeners')},
-                        onConnect:{addListener:mk(function(){},'addListener'),removeListener:mk(function(){},'removeListener'),hasListeners:mk(function(){return false},'hasListeners')}
+                        connect:function(){},
+                        sendMessage:function(){},
+                        onMessage:{addListener:function(){},removeListener:function(){},hasListeners:function(){return false}},
+                        onConnect:{addListener:function(){},removeListener:function(){},hasListeners:function(){return false}}
                     },
                     app:{isInstalled:false,
-                        getDetails:mk(function(){return null},'getDetails'),
-                        getIsInstalled:mk(function(){return false},'getIsInstalled'),
-                        installState:mk(function(cb){if(cb)cb({state:'disabled'})},'installState')
+                        getDetails:function(){return null},
+                        getIsInstalled:function(){return false},
+                        installState:function(cb){if(cb)cb({state:'disabled'})}
                     },
-                    csi:mk(function(){return{startE:Date.now(),onloadT:Date.now(),pageT:0,tran:15}},'csi'),
-                    loadTimes:mk(function(){return{commitLoadTime:Date.now()/1000,connectionInfo:'h2',finishDocumentLoadTime:Date.now()/1000,finishLoadTime:Date.now()/1000,firstPaintAfterLoadTime:0,firstPaintTime:Date.now()/1000,navigationType:'Other',npnNegotiatedProtocol:'h2',requestTime:Date.now()/1000,startLoadTime:Date.now()/1000,wasAlternateProtocolAvailable:false,wasFetchedViaSpdy:true,wasNpnNegotiated:true}},'loadTimes')
+                    csi:function(){return{startE:Date.now(),onloadT:Date.now(),pageT:0,tran:15}},
+                    loadTimes:function(){return{commitLoadTime:Date.now()/1000,connectionInfo:'h2',finishDocumentLoadTime:Date.now()/1000,finishLoadTime:Date.now()/1000,firstPaintAfterLoadTime:0,firstPaintTime:Date.now()/1000,navigationType:'Other',npnNegotiatedProtocol:'h2',requestTime:Date.now()/1000,startLoadTime:Date.now()/1000,wasAlternateProtocolAvailable:false,wasFetchedViaSpdy:true,wasNpnNegotiated:true}}
                 };
             }
 
@@ -90,13 +82,13 @@ class MainActivity : Activity() {
                     }
                     if(navigator.userAgentData.getHighEntropyValues){
                         var origHE=navigator.userAgentData.getHighEntropyValues.bind(navigator.userAgentData);
-                        navigator.userAgentData.getHighEntropyValues=mk(function(hints){
+                        navigator.userAgentData.getHighEntropyValues=function(hints){
                             return origHE(hints).then(function(v){
                                 if(v.brands){for(var i=0;i<v.brands.length;i++){if(v.brands[i].brand&&v.brands[i].brand.indexOf('WebView')>=0)v.brands[i].brand='Google Chrome'}}
                                 if(v.fullVersionList){for(var i=0;i<v.fullVersionList.length;i++){if(v.fullVersionList[i].brand&&v.fullVersionList[i].brand.indexOf('WebView')>=0)v.fullVersionList[i].brand='Google Chrome'}}
                                 return v;
                             });
-                        },'getHighEntropyValues');
+                        };
                     }
                 }
             }catch(e){}
