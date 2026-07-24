@@ -72,6 +72,7 @@ class MainActivity : Activity() {
                             return origHE(hints).then(function(v){
                                 if(v.brands){for(var i=0;i<v.brands.length;i++){if(v.brands[i].brand&&v.brands[i].brand.indexOf('WebView')>=0)v.brands[i].brand='Google Chrome'}}
                                 if(v.fullVersionList){for(var i=0;i<v.fullVersionList.length;i++){if(v.fullVersionList[i].brand&&v.fullVersionList[i].brand.indexOf('WebView')>=0)v.fullVersionList[i].brand='Google Chrome'}}
+                                v.model='K';v.platformVersion='10.0.0';
                                 return v;
                             });
                         };
@@ -105,10 +106,11 @@ class MainActivity : Activity() {
             settings.useWideViewPort = true
             settings.loadWithOverviewMode = true
             settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-            // WebViewマーカー除去 + Chromeバージョンを端末の実Chromeに合わせる
+            // WebViewマーカー除去 + Chrome UA Reduction適用 + Chromeバージョン合わせ
             var ua = settings.userAgentString
                 .replace("; wv", "")
                 .replace(Regex("Version/\\d+\\.\\d+\\s*"), "")
+                .replace(Regex("Android \\d+;\\s*[^)]+\\)"), "Android 10; K)")
             // 端末にインストールされているChromeのバージョンを取得し、
             // UA内のChrome/xxx部分を差し替える(端末ごとに自動で異なる値になる)
             val chromeVersion = try {
