@@ -105,11 +105,24 @@ class MainActivity : Activity() {
             settings.useWideViewPort = true
             settings.loadWithOverviewMode = true
             settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-            // WebViewマーカーだけ除去し、端末固有の情報(モデル名・Androidバージョン・
-            // Chromeバージョン)はそのまま残す。各ユーザーの自然なFPを保持するため。
-            settings.userAgentString = settings.userAgentString
+            // WebViewマーカー除去 + Chromeバージョンを端末の実Chromeに合わせる
+            var ua = settings.userAgentString
                 .replace("; wv", "")
                 .replace(Regex("Version/\\d+\\.\\d+\\s*"), "")
+            // 端末にインストールされているChromeのバージョンを取得し、
+            // UA内のChrome/xxx部分を差し替える(端末ごとに自動で異なる値になる)
+            val chromeVersion = try {
+                packageManager.getPackageInfo("com.android.chrome", 0).versionName
+            } catch (_: Exception) {
+                try {
+                    // Samsung等はパッケージ名が違う場合がある
+                    packageManager.getPackageInfo("com.chrome.beta", 0).versionName
+                } catch (_: Exception) { null }
+            }
+            if (chromeVersion != null) {
+                ua = ua.replace(Regex("Chrome/[\\d.]+"), "Chrome/$chromeVersion")
+            }
+            settings.userAgentString = ua
 
             webViewClient = object : WebViewClient() {
                 override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
