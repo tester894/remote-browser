@@ -3,10 +3,14 @@ package com.remotebrowser
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.graphics.Bitmap
+import android.graphics.Rect
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
+import android.view.PixelCopy
+import android.view.View
 import android.webkit.*
 import android.widget.FrameLayout
 import okhttp3.*
@@ -42,10 +46,13 @@ class MainActivity : Activity() {
 
         // WebView をフルスクリーンで表示
         webView = WebView(this).apply {
-            // ソフトウェアレイヤーで描画させる。
-            // ハードウェア描画のままだと webView.draw() でスクショを撮ったとき、
-            // スクロールで新しく出た部分がキャプチャされず真っ白になるため。
-            setLayerType(android.view.View.LAYER_TYPE_SOFTWARE, null)
+            // API 26 未満は PixelCopy が使えないため、draw() で撮る。
+            // その場合ハードウェア描画だとスクロール後に白抜けするので、
+            // 古い端末だけソフトウェアレイヤーにする。
+            // API 26 以上は PixelCopy を使うのでハードウェア描画のままにする。
+            if (Build.VERSION.SDK_INT < 26) {
+                setLayerType(View.LAYER_TYPE_SOFTWARE, null)
+            }
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
             settings.setSupportZoom(true)
@@ -113,116 +120,188 @@ class MainActivity : Activity() {
     private fun handleCommand(json: String) {
         val msg = JSONObject(json)
         when (msg.optString("type")) {
-            "navigate" -> {
-                val url = msg.getString("url")
-                webView.loadUrl(url)
-            }
-            "back" -> {
-                if (webView.canGoBack()) webView.goBack()
-            }
-            "forward" -> {
-                if (webView.canGoForward()) webView.goForward()
-            }
-            "refresh" -> {
-                webView.reload()
-            }
-            "tap" -> {
-                val x = msg.getInt("x")
-                val y = msg.getInt("y")
-                simulateTap(x, y)
-            }
-            "input_text" -> {
-                val text = msg.getString("text")
-                injectText(text)
-            }
-            "key" -> {
-                val key = msg.optString("key")
-                if (key == "Enter") pressEnter()
-            }
+            "navigate" -> webView.loadUrl(msg.getString("url"))
+            "back" -> if (webView.canGoBack()) webView.goBack()
+            "forward" -> if (webView.canGoForward()) webView.goForward()
+            "refresh" -> webView.reload()
+            "tap" -> simulateTap(msg.getInt("x"), msg.getInt("y"))
+            "input_text" -> injectText(msg.getString("text"))     // 全置換(入力ボックス用)
+            "input_char" -> insertAtCaret(msg.getString("char"))  // ライブ入力(カーソル位置に挿入)
+            "key" -> handleKey(msg.optString("key"))
             "scroll" -> {
                 // dy 指定(ホイール)を優先、無ければ direction(上下ボタン)で ±500
                 val dy = if (msg.has("dy")) msg.getInt("dy") else {
                     if (msg.optString("direction") == "up") -500 else 500
                 }
-                // window とタップ地点の要素の両方をスクロールし、
-                // ページ内スクロールコンテナにも効くようにする
-                webView.evaluateJavascript(
-                    "window.scrollBy(0, $dy);", null
-                )
+                webView.evaluateJavascript("window.scrollBy(0, $dy);", null)
             }
         }
     }
 
     // JavaScript経由でタップをシミュレート
     private fun simulateTap(x: Int, y: Int) {
-        // WebViewの密度に合わせてCSS座標に変換
         val density = resources.displayMetrics.density
         val cssX = (x / density).toInt()
         val cssY = (y / density).toInt()
-
         webView.evaluateJavascript("""
             (function() {
                 var el = document.elementFromPoint($cssX, $cssY);
                 if (!el) return;
-                // クリック相当のマウスイベントを順に発火(タップに近い挙動)
                 ['mousedown','mouseup','click'].forEach(function(t){
                     el.dispatchEvent(new MouseEvent(t, {bubbles:true, cancelable:true, view:window, clientX:$cssX, clientY:$cssY}));
                 });
                 if (typeof el.focus === 'function') el.focus();
-                // 入力欄はスクロールで見える位置へ
-                if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable) {
-                    el.focus();
-                }
             })();
         """, null)
     }
 
-    // JavaScriptでテキスト入力(input/textarea/contenteditable 対応)
+    // 全置換入力(入力ボックスからの一括入力)
     private fun injectText(text: String) {
-        val escaped = text.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n")
+        val t = esc(text)
         webView.evaluateJavascript("""
             (function() {
                 var el = document.activeElement;
                 if (!el) return;
                 var tag = el.tagName;
                 if (tag === 'INPUT' || tag === 'TEXTAREA') {
-                    var proto = (tag === 'TEXTAREA')
-                        ? window.HTMLTextAreaElement.prototype
-                        : window.HTMLInputElement.prototype;
+                    var proto = (tag === 'TEXTAREA') ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
                     var setter = Object.getOwnPropertyDescriptor(proto, 'value');
-                    if (setter && setter.set) {
-                        setter.set.call(el, '$escaped');
-                    } else {
-                        el.value = '$escaped';
-                    }
+                    if (setter && setter.set) setter.set.call(el, '$t'); else el.value = '$t';
                     el.dispatchEvent(new Event('input', { bubbles: true }));
                     el.dispatchEvent(new Event('change', { bubbles: true }));
                 } else if (el.isContentEditable) {
-                    el.textContent = '$escaped';
+                    el.textContent = '$t';
                     el.dispatchEvent(new Event('input', { bubbles: true }));
                 }
             })();
         """, null)
     }
 
-    // Enter キー送出(検索確定・フォーム送信)
-    private fun pressEnter() {
+    // ライブ入力: カーソル位置に文字列を挿入
+    private fun insertAtCaret(text: String) {
+        val t = esc(text)
         webView.evaluateJavascript("""
-            (function() {
+            (function(t) {
                 var el = document.activeElement;
                 if (!el) return;
-                ['keydown','keypress','keyup'].forEach(function(t){
-                    el.dispatchEvent(new KeyboardEvent(t, {key:'Enter', code:'Enter', keyCode:13, which:13, bubbles:true, cancelable:true}));
-                });
-                if (el.form) {
-                    try {
-                        if (el.form.requestSubmit) el.form.requestSubmit();
-                        else el.form.submit();
-                    } catch(e){}
+                var tag = el.tagName;
+                if (tag === 'INPUT' || tag === 'TEXTAREA') {
+                    var s = el.selectionStart, e = el.selectionEnd, v = el.value;
+                    if (s == null) { s = v.length; e = v.length; }
+                    var nv = v.slice(0, s) + t + v.slice(e);
+                    var proto = (tag === 'TEXTAREA') ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
+                    var setter = Object.getOwnPropertyDescriptor(proto, 'value');
+                    if (setter && setter.set) setter.set.call(el, nv); else el.value = nv;
+                    var p = s + t.length;
+                    try { el.selectionStart = el.selectionEnd = p; } catch(_) {}
+                    el.dispatchEvent(new Event('input', { bubbles: true }));
+                } else if (el.isContentEditable) {
+                    document.execCommand('insertText', false, t);
                 }
-            })();
+            })('$t');
         """, null)
     }
+
+    // 個別キー処理
+    private fun handleKey(key: String) {
+        val js = when (key) {
+            "Enter" -> """
+                (function(){
+                    var el=document.activeElement; if(!el) return;
+                    var tag=el.tagName;
+                    if(tag==='TEXTAREA'){
+                        var s=el.selectionStart,e=el.selectionEnd,v=el.value;
+                        var nv=v.slice(0,s)+'\n'+v.slice(e);
+                        var setter=Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype,'value');
+                        if(setter&&setter.set) setter.set.call(el,nv); else el.value=nv;
+                        try{el.selectionStart=el.selectionEnd=s+1;}catch(_){}
+                        el.dispatchEvent(new Event('input',{bubbles:true}));
+                    } else if(el.isContentEditable){
+                        document.execCommand('insertLineBreak');
+                    } else {
+                        ['keydown','keypress','keyup'].forEach(function(t){
+                            el.dispatchEvent(new KeyboardEvent(t,{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true,cancelable:true}));
+                        });
+                        if(el.form){ try{ el.form.requestSubmit?el.form.requestSubmit():el.form.submit(); }catch(e){} }
+                    }
+                })();
+            """
+            "Backspace" -> deleteJs(true)
+            "Delete" -> deleteJs(false)
+            "ArrowLeft" -> moveCaretJs(-1)
+            "ArrowRight" -> moveCaretJs(1)
+            "Home" -> homeEndJs(true)
+            "End" -> homeEndJs(false)
+            "Tab" -> """
+                (function(){
+                    var el=document.activeElement;
+                    var f=Array.prototype.slice.call(document.querySelectorAll('input,textarea,select,button,a[href],[tabindex]'))
+                        .filter(function(x){return !x.disabled && x.offsetParent!==null;});
+                    var i=f.indexOf(el);
+                    if(i>=0 && i+1<f.length){ f[i+1].focus(); }
+                    else if(f.length){ f[0].focus(); }
+                })();
+            """
+            "ArrowUp", "ArrowDown" -> """
+                (function(){
+                    var el=document.activeElement||document.body;
+                    ['keydown','keyup'].forEach(function(t){
+                        el.dispatchEvent(new KeyboardEvent(t,{key:'$key',code:'$key',bubbles:true,cancelable:true}));
+                    });
+                })();
+            """
+            else -> return
+        }
+        webView.evaluateJavascript(js, null)
+    }
+
+    private fun deleteJs(back: Boolean): String = """
+        (function(){
+            var el=document.activeElement; if(!el) return;
+            var tag=el.tagName;
+            if(tag==='INPUT'||tag==='TEXTAREA'){
+                var s=el.selectionStart, e=el.selectionEnd, v=el.value;
+                if(s==null) return;
+                var ns, np;
+                if(s!==e){ ns=v.slice(0,s)+v.slice(e); np=s; }
+                else if($back){ if(s===0) return; ns=v.slice(0,s-1)+v.slice(e); np=s-1; }
+                else { if(s>=v.length) return; ns=v.slice(0,s)+v.slice(e+1); np=s; }
+                var proto=(tag==='TEXTAREA')?window.HTMLTextAreaElement.prototype:window.HTMLInputElement.prototype;
+                var setter=Object.getOwnPropertyDescriptor(proto,'value');
+                if(setter&&setter.set) setter.set.call(el,ns); else el.value=ns;
+                try{el.selectionStart=el.selectionEnd=np;}catch(_){}
+                el.dispatchEvent(new Event('input',{bubbles:true}));
+            } else if(el.isContentEditable){
+                document.execCommand($back?'delete':'forwardDelete',false,null);
+            }
+        })();
+    """
+
+    private fun moveCaretJs(delta: Int): String = """
+        (function(){
+            var el=document.activeElement; if(!el) return;
+            if(el.tagName==='INPUT'||el.tagName==='TEXTAREA'){
+                var s=el.selectionStart,e=el.selectionEnd,len=el.value.length,p;
+                if(s!==e){ p=($delta<0)? s : e; }
+                else { p=Math.max(0,Math.min(len, s+($delta))); }
+                try{el.selectionStart=el.selectionEnd=p;}catch(_){}
+            }
+        })();
+    """
+
+    private fun homeEndJs(home: Boolean): String = """
+        (function(){
+            var el=document.activeElement; if(!el) return;
+            if(el.tagName==='INPUT'||el.tagName==='TEXTAREA'){
+                var p=$home?0:el.value.length;
+                try{el.selectionStart=el.selectionEnd=p;}catch(_){}
+            }
+        })();
+    """
+
+    // JS文字列リテラル用エスケープ
+    private fun esc(s: String): String =
+        s.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n").replace("\r", "\\r")
 
     // ---- スクリーンショット送信 ----
     private fun startCapture() {
@@ -236,19 +315,50 @@ class MainActivity : Activity() {
 
     private fun captureAndSend() {
         if (ws == null) return
-        if (webView.width <= 0 || webView.height <= 0) return
-        // WebView の描画をビットマップにキャプチャ
-        val bitmap = Bitmap.createBitmap(webView.width, webView.height, Bitmap.Config.ARGB_8888)
+        val w = webView.width
+        val h = webView.height
+        if (w <= 0 || h <= 0) return
+
+        if (Build.VERSION.SDK_INT >= 26) {
+            capturePixelCopy(w, h)
+        } else {
+            captureDraw(w, h)
+        }
+    }
+
+    // API 26+: 実際に画面に描画されたピクセルをそのままコピー。
+    // ハードウェア描画のレイヤーも取得できるので、スクロールしても白抜けしない。
+    private fun capturePixelCopy(w: Int, h: Int) {
+        try {
+            val bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+            val loc = IntArray(2)
+            webView.getLocationInWindow(loc)
+            val rect = Rect(loc[0], loc[1], loc[0] + w, loc[1] + h)
+            PixelCopy.request(window, rect, bitmap, { result ->
+                if (result == PixelCopy.SUCCESS) {
+                    sendBitmap(bitmap)
+                } else {
+                    bitmap.recycle()
+                }
+            }, handler)
+        } catch (e: Exception) {
+            captureDraw(w, h)
+        }
+    }
+
+    // API 25 以下向けフォールバック(ソフトウェアレイヤーで draw)
+    private fun captureDraw(w: Int, h: Int) {
+        val bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         val canvas = android.graphics.Canvas(bitmap)
         webView.draw(canvas)
+        sendBitmap(bitmap)
+    }
 
-        // JPEG に圧縮して送信
+    private fun sendBitmap(bitmap: Bitmap) {
         val stream = ByteArrayOutputStream()
         bitmap.compress(Bitmap.CompressFormat.JPEG, 50, stream)
         bitmap.recycle()
-
-        val bytes = stream.toByteArray()
-        ws?.send(ByteString.of(*bytes))
+        ws?.send(ByteString.of(*stream.toByteArray()))
     }
 
     private fun sendCurrentUrl(url: String) {
