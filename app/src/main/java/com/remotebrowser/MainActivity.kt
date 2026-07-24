@@ -42,6 +42,10 @@ class MainActivity : Activity() {
 
         // WebView をフルスクリーンで表示
         webView = WebView(this).apply {
+            // ソフトウェアレイヤーで描画させる。
+            // ハードウェア描画のままだと webView.draw() でスクショを撮ったとき、
+            // スクロールで新しく出た部分がキャプチャされず真っ白になるため。
+            setLayerType(android.view.View.LAYER_TYPE_SOFTWARE, null)
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
             settings.setSupportZoom(true)
