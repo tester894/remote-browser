@@ -23,7 +23,7 @@ class MainActivity : Activity() {
     private val deviceId = UUID.randomUUID().toString().take(8)
 
     // ---- サーバー設定 ----
-    private val SERVER_URL = "ws://116.80.62.19:8580"
+    private val SERVER_URL = "wss://jp.serveirc.com/remote"
 
     // スクショ送信間隔(ms)
     private val CAPTURE_INTERVAL = 500L
