@@ -141,7 +141,9 @@ class MainActivity : Activity() {
         handler.postDelayed({ captureAndSend() }, 90)
     }
 
-    // JavaScript経由でタップをシミュレート
+    // JavaScript経由でタップをシミュレート。
+    // タップ後に「入力欄にフォーカスが入ったか」を判定して管理画面に返す
+    // (管理画面はこれを見てカーソル形状=入力モードを切り替える)
     private fun simulateTap(x: Int, y: Int) {
         val density = resources.displayMetrics.density
         val cssX = (x / density).toInt()
@@ -149,13 +151,36 @@ class MainActivity : Activity() {
         webView.evaluateJavascript("""
             (function() {
                 var el = document.elementFromPoint($cssX, $cssY);
-                if (!el) return;
+                if (!el) return 'false';
                 ['mousedown','mouseup','click'].forEach(function(t){
                     el.dispatchEvent(new MouseEvent(t, {bubbles:true, cancelable:true, view:window, clientX:$cssX, clientY:$cssY}));
                 });
                 if (typeof el.focus === 'function') el.focus();
+                var a = document.activeElement;
+                if (!a) return 'false';
+                var tag = a.tagName;
+                if (a.isContentEditable) return 'true';
+                if (tag === 'TEXTAREA') return 'true';
+                if (tag === 'INPUT') {
+                    var t = (a.type || 'text').toLowerCase();
+                    var noText = ['checkbox','radio','button','submit','reset','file','image','range','color'];
+                    return noText.indexOf(t) === -1 ? 'true' : 'false';
+                }
+                return 'false';
             })();
-        """, null)
+        """) { result ->
+            val editable = result?.contains("true") == true
+            sendEditableState(editable)
+        }
+    }
+
+    // 入力欄にフォーカスがあるかを管理画面へ通知
+    private fun sendEditableState(editable: Boolean) {
+        val json = JSONObject().apply {
+            put("type", "focus_state")
+            put("editable", editable)
+        }
+        ws?.send(json.toString())
     }
 
     // 全置換入力(入力ボックスからの一括入力)
