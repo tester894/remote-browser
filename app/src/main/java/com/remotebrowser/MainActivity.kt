@@ -72,8 +72,6 @@ class MainActivity : Activity() {
                             return origHE(hints).then(function(v){
                                 if(v.brands){for(var i=0;i<v.brands.length;i++){if(v.brands[i].brand&&v.brands[i].brand.indexOf('WebView')>=0)v.brands[i].brand='Google Chrome'}}
                                 if(v.fullVersionList){for(var i=0;i<v.fullVersionList.length;i++){if(v.fullVersionList[i].brand&&v.fullVersionList[i].brand.indexOf('WebView')>=0)v.fullVersionList[i].brand='Google Chrome'}}
-                                if(v.model)v.model='K';
-                                if(v.platformVersion)v.platformVersion='10.0.0';
                                 return v;
                             });
                         };
@@ -107,15 +105,11 @@ class MainActivity : Activity() {
             settings.useWideViewPort = true
             settings.loadWithOverviewMode = true
             settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-            // Chrome Reduced UA形式に書き換え:
-            // - "; wv" と "Version/X.X" を除去
-            // - 端末モデル(例:SCG02 Build/XXX)を "K" に置換(Chrome 110+ User-Agent Reduction)
-            // - Androidバージョンを "10" に固定(同上)
-            // これでChrome本体と同じUA形式になる
+            // WebViewマーカーだけ除去し、端末固有の情報(モデル名・Androidバージョン・
+            // Chromeバージョン)はそのまま残す。各ユーザーの自然なFPを保持するため。
             settings.userAgentString = settings.userAgentString
                 .replace("; wv", "")
                 .replace(Regex("Version/\\d+\\.\\d+\\s*"), "")
-                .replace(Regex("Android \\d+;\\s*[^)]+\\)"), "Android 10; K)")
 
             webViewClient = object : WebViewClient() {
                 override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
