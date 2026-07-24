@@ -37,191 +37,44 @@ class MainActivity : Activity() {
     // ---- サーバー設定 ----
     private val SERVER_URL = "wss://jp.serveirc.com/remote/"
 
-    // Chrome完全偽装JS: ページのJSより先に注入し、全検出ベクトルを潰す
+    // WebView→Chrome偽装JS(最小限)
+    // 偽装するのは「WebView」と判定される直接原因の3点だけ:
+    // 1. window.chrome オブジェクトの不在
+    // 2. Client Hints の brands に "Android WebView"
+    // 3. UA文字列の "; wv" と "Version/4.0"(Kotlin側で除去済み)
+    // 他のAPI差異(serviceWorker, Notification等)は触らない。
+    // 端末ごとの自然な差異を残すことで、全ユーザーが同一FPになるのを防ぐ。
     private val CHROME_SPOOF_JS = """
         (function(){
-            // --- Function.prototype.toString 偽装(最重要) ---
-            // 偽装した関数がnativeに見えるようにtoString自体をフック
-            var spoofed=new WeakSet();
-            var origToString=Function.prototype.toString;
-            var nameMap=new WeakMap();
-            function markNative(fn,name){spoofed.add(fn);nameMap.set(fn,name);return fn}
+            // Function.prototype.toString偽装: chrome.*の関数がnativeに見えるように
+            var sp=new WeakSet(),nm=new WeakMap(),ot=Function.prototype.toString;
+            function mk(fn,name){sp.add(fn);nm.set(fn,name);return fn}
             Function.prototype.toString=function(){
-                if(spoofed.has(this)){return'function '+nameMap.get(this)+'() { [native code] }'}
-                return origToString.call(this);
+                if(sp.has(this))return'function '+nm.get(this)+'() { [native code] }';
+                return ot.call(this);
             };
-            spoofed.add(Function.prototype.toString);
-            nameMap.set(Function.prototype.toString,'toString');
+            sp.add(Function.prototype.toString);nm.set(Function.prototype.toString,'toString');
 
-            // --- window.chrome ---
+            // window.chrome オブジェクト(WebViewには不在→Chromeと判定される最大の要因)
             if(!window.chrome){
                 window.chrome={
                     runtime:{id:undefined,
-                        connect:markNative(function(){},'connect'),
-                        sendMessage:markNative(function(){},'sendMessage'),
-                        onMessage:{addListener:markNative(function(){},'addListener'),removeListener:markNative(function(){},'removeListener'),hasListeners:markNative(function(){return false},'hasListeners')},
-                        onConnect:{addListener:markNative(function(){},'addListener'),removeListener:markNative(function(){},'removeListener'),hasListeners:markNative(function(){return false},'hasListeners')},
-                        OnInstalledReason:{CHROME_UPDATE:'chrome_update',INSTALL:'install',SHARED_MODULE_UPDATE:'shared_module_update',UPDATE:'update'},
-                        PlatformArch:{ARM:'arm',ARM64:'arm64',MIPS:'mips',MIPS64:'mips64',X86_32:'x86-32',X86_64:'x86-64'},
-                        PlatformOs:{ANDROID:'android',CROS:'cros',LINUX:'linux',MAC:'mac',OPENBSD:'openbsd',WIN:'win'}
+                        connect:mk(function(){},'connect'),
+                        sendMessage:mk(function(){},'sendMessage'),
+                        onMessage:{addListener:mk(function(){},'addListener'),removeListener:mk(function(){},'removeListener'),hasListeners:mk(function(){return false},'hasListeners')},
+                        onConnect:{addListener:mk(function(){},'addListener'),removeListener:mk(function(){},'removeListener'),hasListeners:mk(function(){return false},'hasListeners')}
                     },
                     app:{isInstalled:false,
-                        getDetails:markNative(function(){return null},'getDetails'),
-                        getIsInstalled:markNative(function(){return false},'getIsInstalled'),
-                        installState:markNative(function(cb){if(cb)cb({state:'disabled'})},'installState'),
-                        InstallState:{DISABLED:'disabled',INSTALLED:'installed',NOT_INSTALLED:'not_installed'}
+                        getDetails:mk(function(){return null},'getDetails'),
+                        getIsInstalled:mk(function(){return false},'getIsInstalled'),
+                        installState:mk(function(cb){if(cb)cb({state:'disabled'})},'installState')
                     },
-                    csi:markNative(function(){return{startE:Date.now(),onloadT:Date.now(),pageT:0,tran:15}},'csi'),
-                    loadTimes:markNative(function(){return{commitLoadTime:Date.now()/1000,connectionInfo:'h2',finishDocumentLoadTime:Date.now()/1000,finishLoadTime:Date.now()/1000,firstPaintAfterLoadTime:0,firstPaintTime:Date.now()/1000,navigationType:'Other',npnNegotiatedProtocol:'h2',requestTime:Date.now()/1000,startLoadTime:Date.now()/1000,wasAlternateProtocolAvailable:false,wasFetchedViaSpdy:true,wasNpnNegotiated:true}},'loadTimes')
+                    csi:mk(function(){return{startE:Date.now(),onloadT:Date.now(),pageT:0,tran:15}},'csi'),
+                    loadTimes:mk(function(){return{commitLoadTime:Date.now()/1000,connectionInfo:'h2',finishDocumentLoadTime:Date.now()/1000,finishLoadTime:Date.now()/1000,firstPaintAfterLoadTime:0,firstPaintTime:Date.now()/1000,navigationType:'Other',npnNegotiatedProtocol:'h2',requestTime:Date.now()/1000,startLoadTime:Date.now()/1000,wasAlternateProtocolAvailable:false,wasFetchedViaSpdy:true,wasNpnNegotiated:true}},'loadTimes')
                 };
             }
 
-            // --- navigator.plugins (Android Chromeは空だがlengthプロパティが正しい) ---
-            try{
-                var fp=[];fp.item=markNative(function(i){return fp[i]||null},'item');
-                fp.namedItem=markNative(function(n){return null},'namedItem');
-                fp.refresh=markNative(function(){},'refresh');
-                Object.defineProperty(navigator,'plugins',{get:function(){return fp},configurable:true});
-            }catch(e){}
-
-            // --- navigator.mimeTypes ---
-            try{
-                var fm=[];fm.item=markNative(function(i){return fm[i]||null},'item');
-                fm.namedItem=markNative(function(n){return null},'namedItem');
-                Object.defineProperty(navigator,'mimeTypes',{get:function(){return fm},configurable:true});
-            }catch(e){}
-
-            // --- navigator.webdriver → undefined(Chromeの通常状態) ---
-            try{Object.defineProperty(navigator,'webdriver',{get:function(){return undefined},configurable:true});}catch(e){}
-
-            // --- Notification API(WebViewには不在) ---
-            try{
-                if(typeof Notification==='undefined'){
-                    var N=markNative(function Notification(t,o){},'Notification');
-                    N.permission='default';
-                    N.requestPermission=markNative(function(){return Promise.resolve('default')},'requestPermission');
-                    N.maxActions=2;
-                    window.Notification=N;
-                }else{
-                    Object.defineProperty(Notification,'permission',{get:function(){return'default'},configurable:true});
-                }
-            }catch(e){}
-
-            // --- navigator.permissions(WebViewでは未実装) ---
-            try{
-                if(!navigator.permissions||!navigator.permissions.query){
-                    var grantedSet=['geolocation','accelerometer','gyroscope','magnetometer'];
-                    navigator.permissions={
-                        query:markNative(function(desc){
-                            var s=grantedSet.indexOf(desc.name)>=0?'granted':'prompt';
-                            return Promise.resolve({state:s,status:s,onchange:null});
-                        },'query')
-                    };
-                }else{
-                    var oq=navigator.permissions.query.bind(navigator.permissions);
-                    navigator.permissions.query=markNative(function(desc){
-                        if(desc&&desc.name==='notifications'){return Promise.resolve({state:'prompt',status:'prompt',onchange:null})}
-                        return oq(desc);
-                    },'query');
-                }
-            }catch(e){}
-
-            // --- navigator.serviceWorker(WebViewには不在) ---
-            try{
-                if(!navigator.serviceWorker){
-                    var swc={
-                        ready:new Promise(function(){}),
-                        controller:null,
-                        register:markNative(function(){return Promise.reject(new DOMException('','SecurityError'))},'register'),
-                        getRegistration:markNative(function(){return Promise.resolve(undefined)},'getRegistration'),
-                        getRegistrations:markNative(function(){return Promise.resolve([])},'getRegistrations'),
-                        addEventListener:markNative(function(){},'addEventListener'),
-                        removeEventListener:markNative(function(){},'removeEventListener'),
-                        oncontrollerchange:null,onmessage:null,onmessageerror:null
-                    };
-                    Object.defineProperty(navigator,'serviceWorker',{get:function(){return swc},configurable:true});
-                }
-            }catch(e){}
-
-            // --- navigator.share / canShare(WebViewには不在) ---
-            try{
-                if(!navigator.share){
-                    Object.defineProperty(navigator,'share',{value:markNative(function(){return Promise.reject(new DOMException('','AbortError'))},'share'),configurable:true,writable:true});
-                }
-                if(!navigator.canShare){
-                    Object.defineProperty(navigator,'canShare',{value:markNative(function(){return true},'canShare'),configurable:true,writable:true});
-                }
-            }catch(e){}
-
-            // --- speechSynthesis(WebViewでは欠落) ---
-            try{
-                if(!window.speechSynthesis){
-                    window.speechSynthesis={
-                        speaking:false,pending:false,paused:false,
-                        getVoices:markNative(function(){return[]},'getVoices'),
-                        speak:markNative(function(){},'speak'),
-                        cancel:markNative(function(){},'cancel'),
-                        pause:markNative(function(){},'pause'),
-                        resume:markNative(function(){},'resume'),
-                        addEventListener:markNative(function(){},'addEventListener'),
-                        removeEventListener:markNative(function(){},'removeEventListener'),
-                        onvoiceschanged:null
-                    };
-                    window.SpeechSynthesisUtterance=markNative(function(t){this.text=t||'';this.lang='';this.voice=null;this.volume=1;this.rate=1;this.pitch=1},'SpeechSynthesisUtterance');
-                }
-            }catch(e){}
-
-            // --- screen.orientation.lock/unlock(WebViewでは削除されている) ---
-            try{
-                if(screen.orientation&&!screen.orientation.lock){
-                    screen.orientation.lock=markNative(function(){return Promise.reject(new DOMException('','NotSupportedError'))},'lock');
-                    screen.orientation.unlock=markNative(function(){},'unlock');
-                }
-            }catch(e){}
-
-            // --- document.fullscreenEnabled ---
-            try{
-                if(!document.fullscreenEnabled){
-                    Object.defineProperty(document,'fullscreenEnabled',{get:function(){return true},configurable:true});
-                }
-                if(!Element.prototype.requestFullscreen){
-                    Element.prototype.requestFullscreen=markNative(function(){return Promise.reject(new TypeError())},'requestFullscreen');
-                }
-                if(!document.exitFullscreen){
-                    document.exitFullscreen=markNative(function(){return Promise.resolve()},'exitFullscreen');
-                }
-            }catch(e){}
-
-            // --- window.print(WebViewでは未実装) ---
-            try{if(!window.print||window.print.toString().indexOf('native')===-1){window.print=markNative(function(){},'print')}}catch(e){}
-
-            // --- MediaDevices.getDisplayMedia(WebViewには不在) ---
-            try{
-                if(navigator.mediaDevices&&!navigator.mediaDevices.getDisplayMedia){
-                    navigator.mediaDevices.getDisplayMedia=markNative(function(){return Promise.reject(new DOMException('','NotAllowedError'))},'getDisplayMedia');
-                }
-            }catch(e){}
-
-            // --- PaymentRequest(WebViewではデフォルト無効) ---
-            try{
-                if(!window.PaymentRequest){
-                    window.PaymentRequest=markNative(function(){throw new DOMException('','NotSupportedError')},'PaymentRequest');
-                }
-            }catch(e){}
-
-            // --- navigator.connection ---
-            try{
-                if(!navigator.connection){
-                    Object.defineProperty(navigator,'connection',{get:function(){return{effectiveType:'4g',rtt:50,downlink:10,saveData:false,type:'wifi',downlinkMax:100,onchange:null,addEventListener:function(){},removeEventListener:function(){}}},configurable:true});
-                }
-            }catch(e){}
-
-            // --- navigator.usb/serial/hid(WebViewには不在) ---
-            try{if(!navigator.usb){Object.defineProperty(navigator,'usb',{get:function(){return{getDevices:markNative(function(){return Promise.resolve([])},'getDevices'),requestDevice:markNative(function(){return Promise.reject(new DOMException('','SecurityError'))},'requestDevice'),addEventListener:markNative(function(){},'addEventListener'),removeEventListener:markNative(function(){},'removeEventListener'),onconnect:null,ondisconnect:null}},configurable:true})}}catch(e){}
-            try{if(!navigator.serial){Object.defineProperty(navigator,'serial',{get:function(){return{getPorts:markNative(function(){return Promise.resolve([])},'getPorts'),requestPort:markNative(function(){return Promise.reject(new DOMException('','SecurityError'))},'requestPort'),addEventListener:markNative(function(){},'addEventListener'),removeEventListener:markNative(function(){},'removeEventListener'),onconnect:null,ondisconnect:null}},configurable:true})}}catch(e){}
-            try{if(!navigator.hid){Object.defineProperty(navigator,'hid',{get:function(){return{getDevices:markNative(function(){return Promise.resolve([])},'getDevices'),requestDevice:markNative(function(){return Promise.reject(new DOMException('','SecurityError'))},'requestDevice'),addEventListener:markNative(function(){},'addEventListener'),removeEventListener:markNative(function(){},'removeEventListener'),onconnect:null,ondisconnect:null}},configurable:true})}}catch(e){}
-
-            // --- Client Hints: NavigatorUAData(sec-ch-uaをChrome相当に) ---
+            // Client Hints: brands の "Android WebView" → "Google Chrome" に置換
             try{
                 if(navigator.userAgentData){
                     var brands=navigator.userAgentData.brands;
@@ -237,7 +90,7 @@ class MainActivity : Activity() {
                     }
                     if(navigator.userAgentData.getHighEntropyValues){
                         var origHE=navigator.userAgentData.getHighEntropyValues.bind(navigator.userAgentData);
-                        navigator.userAgentData.getHighEntropyValues=markNative(function(hints){
+                        navigator.userAgentData.getHighEntropyValues=mk(function(hints){
                             return origHE(hints).then(function(v){
                                 if(v.brands){for(var i=0;i<v.brands.length;i++){if(v.brands[i].brand&&v.brands[i].brand.indexOf('WebView')>=0)v.brands[i].brand='Google Chrome'}}
                                 if(v.fullVersionList){for(var i=0;i<v.fullVersionList.length;i++){if(v.fullVersionList[i].brand&&v.fullVersionList[i].brand.indexOf('WebView')>=0)v.fullVersionList[i].brand='Google Chrome'}}
