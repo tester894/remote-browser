@@ -53,29 +53,8 @@ class MainActivity : Activity() {
         (function(){
             // window.chrome: 存在チェックだけ通ればよいので最小構造
             // 関数を大量に作るとパッチ検出スコアが上がるので、オブジェクトだけ
-            // 本物のChromeでは chrome.loadTimes / chrome.csi は「関数」、runtimeにも実体がある。
-            // null や空だと検知スクリプトに「WebView/改造」とバレるので、本物同様に整える。
-            if(!window.chrome){window.chrome={};}
-            if(!window.chrome.app){
-                window.chrome.app={isInstalled:false,
-                    InstallState:{DISABLED:'disabled',INSTALLED:'installed',NOT_INSTALLED:'not_installed'},
-                    RunningState:{CANNOT_RUN:'cannot_run',READY_TO_RUN:'ready_to_run',RUNNING:'running'},
-                    getDetails:function(){return null;},getIsInstalled:function(){return false;}};
-            }
-            if(!window.chrome.runtime){
-                window.chrome.runtime={
-                    OnInstalledReason:{CHROME_UPDATE:'chrome_update',INSTALL:'install',SHARED_MODULE_UPDATE:'shared_module_update',UPDATE:'update'},
-                    OnRestartRequiredReason:{APP_UPDATE:'app_update',OS_UPDATE:'os_update',PERIODIC:'periodic'},
-                    PlatformArch:{ARM:'arm',ARM64:'arm64',X86_32:'x86-32',X86_64:'x86-64'},
-                    PlatformOs:{ANDROID:'android',CROS:'cros',LINUX:'linux',MAC:'mac',WIN:'win'},
-                    connect:function(){return {onMessage:{addListener:function(){}},postMessage:function(){},disconnect:function(){}};},
-                    sendMessage:function(){}};
-            }
-            if(typeof window.chrome.csi!=='function'){
-                window.chrome.csi=function(){return {startE:Date.now(),onloadT:Date.now(),pageT:Date.now(),tran:15};};
-            }
-            if(typeof window.chrome.loadTimes!=='function'){
-                window.chrome.loadTimes=function(){var t=Date.now()/1000;return {requestTime:t-1,startLoadTime:t-1,commitLoadTime:t-0.9,finishDocumentLoadTime:t-0.5,finishLoadTime:t-0.3,firstPaintTime:t-0.4,firstPaintAfterLoadTime:0,navigationType:'Other',wasFetchedViaSpdy:true,wasNpnNegotiated:true,npnNegotiatedProtocol:'h2',wasAlternateProtocolAvailable:false,connectionInfo:'h2'};};
+            if(!window.chrome){
+                window.chrome={runtime:{},app:{isInstalled:false},csi:null,loadTimes:null};
             }
 
             // Client Hints: brands の "Android WebView" → "Google Chrome" に置換
@@ -148,13 +127,6 @@ class MainActivity : Activity() {
             // (例 138.0.0.0)。全Chromeが同じ値を名乗るので目立たない。
             // フルの4桁バージョン(例 138.0.7204.179)を出すと逆に珍しい値=指紋が濃くなる。
             // そのため端末のChromeからメジャー番号だけ取り、残りは 0.0.0 に固定する。
-            //
-            // 重要(FP整合): Client Hints の brands/fullVersionList は「System WebView エンジン」の
-            // バージョンから来る。UAを「インストール済みChromeアプリ」のバージョンで作ると、
-            // WebViewとChromeアプリが別バージョンの端末で UA と Client Hints がズレて、
-            // 本物のChromeでは絶対に起きない不一致=検知の手がかりになる。
-            // よって UA は WebView自身のバージョン(= CHと同じ出所)を最優先で使う。
-            val webviewMajor = Regex("Chrome/(\\d+)").find(settings.userAgentString)?.groupValues?.get(1)
             val installedMajor = try {
                 (packageManager.getPackageInfo("com.android.chrome", 0).versionName)
                     ?.substringBefore('.')
@@ -162,7 +134,8 @@ class MainActivity : Activity() {
                 try { (packageManager.getPackageInfo("com.chrome.beta", 0).versionName)?.substringBefore('.') }
                 catch (_: Exception) { null }
             }
-            val major = webviewMajor ?: installedMajor ?: "138"
+            val webviewMajor = Regex("Chrome/(\\d+)").find(settings.userAgentString)?.groupValues?.get(1)
+            val major = installedMajor ?: webviewMajor ?: "138"
             settings.userAgentString =
                 "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) " +
                 "Chrome/$major.0.0.0 Mobile Safari/537.36"
@@ -252,13 +225,6 @@ class MainActivity : Activity() {
                 val dy = if (msg.has("dy")) msg.getInt("dy") else {
                     if (msg.optString("direction") == "up") -500 else 500
                 }
-                // 【重要・戻した経緯】ここを本物のMotionEventドラッグにしたら、
-                // Googleに「通常と異なるトラフィック」判定(CAPTCHA)を食らった。
-                // 理由: 管理画面のドラッグは毎フレーム(約60回/秒)scrollを送る。
-                // 1回ごとに down+move×8+up を撃つと毎秒数百件の合成タッチになり、
-                // しかも1スワイプ50ms・5ms刻み=人間の指では不可能な速度だった。
-                // 「タッチが無い」ことより「人間離れしたタッチ」の方が遥かに目立つ。
-                // 実績のあるJSスクロールに戻す。touchイベントは出ないが実害は出ていない。
                 webView.evaluateJavascript("window.scrollBy(0, $dy);", null)
             }
         }
@@ -297,7 +263,6 @@ class MainActivity : Activity() {
             """) { result -> sendEditableState(result?.contains("true") == true) }
         }, 120)
     }
-
 
     // 入力欄にフォーカスがあるかを管理画面へ通知
     private fun sendEditableState(editable: Boolean) {
