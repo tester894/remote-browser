@@ -66,8 +66,9 @@ class MainActivity : Activity() {
     // 追加しない(無いままでもCAPTCHAは出ないことを実機確認済み)。
 
     // スクショ送信間隔(ms): 操作直後は高速、アイドル時は省電力
-    private val CAPTURE_FAST = 150L
-    private val CAPTURE_IDLE = 1000L
+    private val CAPTURE_GESTURE = 60L   // ドラッグ中: 滑らかさ優先で最速
+    private val CAPTURE_FAST = 120L     // 操作直後
+    private val CAPTURE_IDLE = 1000L    // 放置中: 省電力
     private val ACTIVE_WINDOW = 2000L   // 最後の操作から2秒間は高速モード
     private var lastCommandTime = 0L
 
@@ -89,6 +90,11 @@ class MainActivity : Activity() {
             if (Build.VERSION.SDK_INT < 26) {
                 setLayerType(View.LAYER_TYPE_SOFTWARE, null)
             }
+            // 勢いよくドラッグするとページ端で「引っ張り(オーバースクロール)」が起き、
+            // その余白がスクショに黒帯として写る。遠隔操作では不要なので無効化する。
+            overScrollMode = View.OVER_SCROLL_NEVER
+            isVerticalScrollBarEnabled = false
+            isHorizontalScrollBarEnabled = false
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
             settings.setSupportZoom(true)
@@ -388,15 +394,22 @@ class MainActivity : Activity() {
         handler.postDelayed(object : Runnable {
             override fun run() {
                 captureAndSend()
-                val interval = if (System.currentTimeMillis() - lastCommandTime < ACTIVE_WINDOW)
-                    CAPTURE_FAST else CAPTURE_IDLE
+                val sinceCmd = System.currentTimeMillis() - lastCommandTime
+                val interval = when {
+                    gestureActive -> CAPTURE_GESTURE          // ドラッグ中は最速で滑らかに
+                    sinceCmd < ACTIVE_WINDOW -> CAPTURE_FAST   // 操作直後
+                    else -> CAPTURE_IDLE                       // 放置中は省電力
+                }
                 handler.postDelayed(this, interval)
             }
         }, CAPTURE_FAST)
     }
 
     private fun captureAndSend() {
-        if (ws == null) return
+        val sock = ws ?: return
+        // バックプレッシャ対策: 送信キューが溜まっている時に新フレームを積むと
+        // 遅延がどんどん増える(古い絵が遅れて届く)。溜まっていればこの回は捨てて最新を優先。
+        if (sock.queueSize() > 400_000) return
         val w = webView.width
         val h = webView.height
         if (w <= 0 || h <= 0) return
