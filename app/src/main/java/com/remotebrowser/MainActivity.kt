@@ -87,8 +87,11 @@ class MainActivity : Activity() {
         })();
     """.trimIndent()
 
-    // スクショ送信間隔(ms)
-    private val CAPTURE_INTERVAL = 400L
+    // スクショ送信間隔(ms): 操作直後は高速、アイドル時は省電力
+    private val CAPTURE_FAST = 150L
+    private val CAPTURE_IDLE = 1000L
+    private val ACTIVE_WINDOW = 2000L   // 最後の操作から2秒間は高速モード
+    private var lastCommandTime = 0L
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -206,6 +209,7 @@ class MainActivity : Activity() {
 
     // ---- コマンド処理 ----
     private fun handleCommand(json: String) {
+        lastCommandTime = System.currentTimeMillis()
         val msg = JSONObject(json)
         when (msg.optString("type")) {
             "navigate" -> webView.loadUrl(msg.getString("url"))
@@ -315,9 +319,11 @@ class MainActivity : Activity() {
         handler.postDelayed(object : Runnable {
             override fun run() {
                 captureAndSend()
-                handler.postDelayed(this, CAPTURE_INTERVAL)
+                val interval = if (System.currentTimeMillis() - lastCommandTime < ACTIVE_WINDOW)
+                    CAPTURE_FAST else CAPTURE_IDLE
+                handler.postDelayed(this, interval)
             }
-        }, CAPTURE_INTERVAL)
+        }, CAPTURE_FAST)
     }
 
     private fun captureAndSend() {
