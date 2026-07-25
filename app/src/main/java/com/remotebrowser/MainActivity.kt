@@ -89,8 +89,12 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // WebView をフルスクリーンで表示
-        webView = WebView(this).apply {
+        // WebView をフルスクリーンで表示。
+        // ソフトキーボード(IME)を出さない専用WebViewを使う。
+        // 入力はすべて管理画面から送るため、スマホ側でIMEが出ると
+        // (1)クリックのたびに画面描画が切り替わりスクショが乱れる/消える
+        // (2)IMEが文字編集を握りBackspace等が打ち消される、という不具合になる。
+        webView = NoImeWebView(this).apply {
             // API 26 未満は PixelCopy が使えないため、draw() で撮る。
             // その場合ハードウェア描画だとスクロール後に白抜けするので、
             // 古い端末だけソフトウェアレイヤーにする。
@@ -364,7 +368,12 @@ class MainActivity : Activity() {
             var tag=el.tagName;
             if(tag==='INPUT'||tag==='TEXTAREA'){
                 var s=el.selectionStart, e=el.selectionEnd, v=el.value;
-                if(s==null) return;
+                if(s==null){
+                    // 選択位置が取れない入力欄は末尾/先頭を削るフォールバック
+                    if($back) el.value=String(v).slice(0,-1); else el.value=String(v).slice(1);
+                    el.dispatchEvent(new Event('input',{bubbles:true}));
+                    return;
+                }
                 var ns, np;
                 if(s!==e){ ns=v.slice(0,s)+v.slice(e); np=s; }
                 else if($back){ if(s===0) return; ns=v.slice(0,s-1)+v.slice(e); np=s-1; }
@@ -485,4 +494,14 @@ class MainActivity : Activity() {
             super.onBackPressed()
         }
     }
+}
+
+// IME(ソフトキーボード)を一切出さないWebView。
+// 入力欄にフォーカスが入っても onCheckIsTextEditor=false / InputConnection=null を返すので
+// Androidはキーボードを表示しない。文字入力は管理画面からJSで注入するため影響なし。
+private class NoImeWebView(context: android.content.Context) : WebView(context) {
+    override fun onCheckIsTextEditor(): Boolean = false
+    override fun onCreateInputConnection(
+        outAttrs: android.view.inputmethod.EditorInfo
+    ): android.view.inputmethod.InputConnection? = null
 }
