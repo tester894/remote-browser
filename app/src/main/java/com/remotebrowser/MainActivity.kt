@@ -51,29 +51,11 @@ class MainActivity : Activity() {
     // 端末ごとの自然な差異を残すことで、全ユーザーが同一FPになるのを防ぐ。
     private val CHROME_SPOOF_JS = """
         (function(){
-            // 【切り分けVariant1】window.chrome を本物Chrome同様に。
-            // 本物では loadTimes/csi は関数、runtime にも実体がある。
-            if(!window.chrome){window.chrome={};}
-            if(!window.chrome.app){
-                window.chrome.app={isInstalled:false,
-                    InstallState:{DISABLED:'disabled',INSTALLED:'installed',NOT_INSTALLED:'not_installed'},
-                    RunningState:{CANNOT_RUN:'cannot_run',READY_TO_RUN:'ready_to_run',RUNNING:'running'},
-                    getDetails:function(){return null;},getIsInstalled:function(){return false;}};
-            }
-            if(!window.chrome.runtime){
-                window.chrome.runtime={
-                    OnInstalledReason:{CHROME_UPDATE:'chrome_update',INSTALL:'install',SHARED_MODULE_UPDATE:'shared_module_update',UPDATE:'update'},
-                    OnRestartRequiredReason:{APP_UPDATE:'app_update',OS_UPDATE:'os_update',PERIODIC:'periodic'},
-                    PlatformArch:{ARM:'arm',ARM64:'arm64',X86_32:'x86-32',X86_64:'x86-64'},
-                    PlatformOs:{ANDROID:'android',CROS:'cros',LINUX:'linux',MAC:'mac',WIN:'win'},
-                    connect:function(){return {onMessage:{addListener:function(){}},postMessage:function(){},disconnect:function(){}};},
-                    sendMessage:function(){}};
-            }
-            if(typeof window.chrome.csi!=='function'){
-                window.chrome.csi=function(){return {startE:Date.now(),onloadT:Date.now(),pageT:Date.now(),tran:15};};
-            }
-            if(typeof window.chrome.loadTimes!=='function'){
-                window.chrome.loadTimes=function(){var t=Date.now()/1000;return {requestTime:t-1,startLoadTime:t-1,commitLoadTime:t-0.9,finishDocumentLoadTime:t-0.5,finishLoadTime:t-0.3,firstPaintTime:t-0.4,firstPaintAfterLoadTime:0,navigationType:'Other',wasFetchedViaSpdy:true,wasNpnNegotiated:true,npnNegotiatedProtocol:'h2',wasAlternateProtocolAvailable:false,connectionInfo:'h2'};};
+            // window.chrome: 存在チェックだけ通ればよいので最小構造。
+            // 【実証済み】loadTimes/csi を関数化し runtime を盛る版(Variant1)は
+            // Google の CAPTCHA を誘発した。関数を盛ると検出される=最小に留める。
+            if(!window.chrome){
+                window.chrome={runtime:{},app:{isInstalled:false},csi:null,loadTimes:null};
             }
 
             // Client Hints: brands の "Android WebView" → "Google Chrome" に置換
@@ -146,6 +128,10 @@ class MainActivity : Activity() {
             // (例 138.0.0.0)。全Chromeが同じ値を名乗るので目立たない。
             // フルの4桁バージョン(例 138.0.7204.179)を出すと逆に珍しい値=指紋が濃くなる。
             // そのため端末のChromeからメジャー番号だけ取り、残りは 0.0.0 に固定する。
+            // 【切り分けVariant2】UAのメジャーを System WebView の実バージョン優先にする。
+            // Client Hints は WebViewエンジン由来なので、UAもWebView由来にすれば
+            // 「UA と CH のバージョン不一致」(本物Chromeでは起きない)を解消できる。
+            val webviewMajor = Regex("Chrome/(\\d+)").find(settings.userAgentString)?.groupValues?.get(1)
             val installedMajor = try {
                 (packageManager.getPackageInfo("com.android.chrome", 0).versionName)
                     ?.substringBefore('.')
@@ -153,8 +139,7 @@ class MainActivity : Activity() {
                 try { (packageManager.getPackageInfo("com.chrome.beta", 0).versionName)?.substringBefore('.') }
                 catch (_: Exception) { null }
             }
-            val webviewMajor = Regex("Chrome/(\\d+)").find(settings.userAgentString)?.groupValues?.get(1)
-            val major = installedMajor ?: webviewMajor ?: "138"
+            val major = webviewMajor ?: installedMajor ?: "138"
             settings.userAgentString =
                 "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) " +
                 "Chrome/$major.0.0.0 Mobile Safari/537.36"
