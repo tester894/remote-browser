@@ -42,6 +42,18 @@ class MainActivity : Activity() {
     // ---- サーバー設定 ----
     private val SERVER_URL = "wss://jp.serveirc.com/remote/"
 
+    // 高エントロピーClient Hintsに入れる端末の実値。
+    // WebViewは model/platformVersion を空で返すため、空だと逆に不自然(本物Chromeは実値を返す)。
+    // Build.* の実値を入れることで、端末ごとにばらけ、本物Chromeの挙動に一致する。
+    // JS文字列に埋めるので ' と \ は除去(model名に紛れても壊れないように)。
+    private val jsModel = (Build.MODEL ?: "").replace("\\", "").replace("'", "")
+    private val jsPlatformVersion = run {
+        val rel = (Build.VERSION.RELEASE ?: "10").replace("\\", "").replace("'", "")
+        val parts = rel.split(".").toMutableList()
+        while (parts.size < 3) parts.add("0")
+        parts.take(3).joinToString(".")
+    }
+
     // WebView→Chrome偽装JS(最小限)
     // 偽装するのは「WebView」と判定される直接原因の3点だけ:
     // 1. window.chrome オブジェクトの不在
@@ -78,9 +90,11 @@ class MainActivity : Activity() {
                             return origHE(hints).then(function(v){
                                 if(v.brands){for(var i=0;i<v.brands.length;i++){if(v.brands[i].brand&&v.brands[i].brand.indexOf('WebView')>=0)v.brands[i].brand='Google Chrome'}}
                                 if(v.fullVersionList){for(var i=0;i<v.fullVersionList.length;i++){if(v.fullVersionList[i].brand&&v.fullVersionList[i].brand.indexOf('WebView')>=0)v.fullVersionList[i].brand='Google Chrome'}}
-                                // 【切り分けVariant3】model/platformVersion の固定をやめ、端末の実値をそのまま返す。
-                                // 本物Chromeも「UA文字列は Android 10;K に凍結、高エントロシー要求には実機の値」を返す挙動。
-                                // これで端末ごとにばらけ(全員同一を回避)、かつ本物Chromeに近づく。ブランドのWebView除去は維持。
+                                // model/platformVersion に端末の実値(Kotlin側 Build.* から注入)を返す。
+                                // WebViewは高エントロピーを空で返す→空だと逆に不自然なので実値で埋める。
+                                // 端末ごとにばらけ、UA文字列は凍結のまま=本物Chromeと同じ挙動。空値のみ補完し実値があれば尊重。
+                                if(v.model!==undefined && !v.model) v.model='$jsModel';
+                                if(v.platformVersion!==undefined && !v.platformVersion) v.platformVersion='$jsPlatformVersion';
                                 return v;
                             });
                         };
