@@ -329,7 +329,11 @@ class MainActivity : Activity() {
                         ['keydown','keypress','keyup'].forEach(function(t){
                             el.dispatchEvent(new KeyboardEvent(t,{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true,cancelable:true}));
                         });
-                        if(el.form){ try{ el.form.requestSubmit?el.form.requestSubmit():el.form.submit(); }catch(e){} }
+                        var form = el.form || (el.closest ? el.closest('form') : null);
+                        if(form){
+                            try{ if(form.requestSubmit){ form.requestSubmit(); } else { form.submit(); } }
+                            catch(e){ try{ form.submit(); }catch(_){} }
+                        }
                     }
                 })();
             """
