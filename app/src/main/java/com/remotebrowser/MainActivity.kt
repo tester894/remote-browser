@@ -57,55 +57,13 @@ class MainActivity : Activity() {
         parts.take(3).joinToString(".")
     }
 
-    // WebView→Chrome偽装JS(最小限)
-    // 偽装するのは「WebView」と判定される直接原因の3点だけ:
-    // 1. window.chrome オブジェクトの不在
-    // 2. Client Hints の brands に "Android WebView"
-    // 3. UA文字列の "; wv" と "Version/4.0"(Kotlin側で除去済み)
-    // 他のAPI差異(serviceWorker, Notification等)は触らない。
-    // 端末ごとの自然な差異を残すことで、全ユーザーが同一FPになるのを防ぐ。
-    private val CHROME_SPOOF_JS = """
-        (function(){
-            // window.chrome: 存在チェックだけ通ればよいので最小構造。
-            // 【実証済み】loadTimes/csi を関数化し runtime を盛る版(Variant1)は
-            // Google の CAPTCHA を誘発した。関数を盛ると検出される=最小に留める。
-            if(!window.chrome){
-                window.chrome={runtime:{},app:{isInstalled:false},csi:null,loadTimes:null};
-            }
-
-            // Client Hints: brands の "Android WebView" → "Google Chrome" に置換
-            try{
-                if(navigator.userAgentData){
-                    var brands=navigator.userAgentData.brands;
-                    if(brands){
-                        var fixed=[];
-                        for(var i=0;i<brands.length;i++){
-                            var b=brands[i];
-                            if(b.brand&&b.brand.indexOf('WebView')>=0){
-                                fixed.push({brand:'Google Chrome',version:b.version});
-                            }else{fixed.push(b)}
-                        }
-                        Object.defineProperty(navigator.userAgentData,'brands',{get:function(){return fixed},configurable:true});
-                    }
-                    if(navigator.userAgentData.getHighEntropyValues){
-                        var origHE=navigator.userAgentData.getHighEntropyValues.bind(navigator.userAgentData);
-                        navigator.userAgentData.getHighEntropyValues=function(hints){
-                            return origHE(hints).then(function(v){
-                                if(v.brands){for(var i=0;i<v.brands.length;i++){if(v.brands[i].brand&&v.brands[i].brand.indexOf('WebView')>=0)v.brands[i].brand='Google Chrome'}}
-                                if(v.fullVersionList){for(var i=0;i<v.fullVersionList.length;i++){if(v.fullVersionList[i].brand&&v.fullVersionList[i].brand.indexOf('WebView')>=0)v.fullVersionList[i].brand='Google Chrome'}}
-                                // model/platformVersion に端末の実値(Kotlin側 Build.* から注入)を返す。
-                                // WebViewは高エントロピーを空で返す→空だと逆に不自然なので実値で埋める。
-                                // 端末ごとにばらけ、UA文字列は凍結のまま=本物Chromeと同じ挙動。空値のみ補完し実値があれば尊重。
-                                if(v.model!==undefined && !v.model) v.model='$jsModel';
-                                if(v.platformVersion!==undefined && !v.platformVersion) v.platformVersion='$jsPlatformVersion';
-                                return v;
-                            });
-                        };
-                    }
-                }
-            }catch(e){}
-        })();
-    """.trimIndent()
+    // 【削除済み】以前は onPageStarted で CHROME_SPOOF_JS を注入し
+    // window.chrome追加 / Client Hints の brands・model偽装をJSで試みていたが、
+    // 実測で「一度も適用されていない」ことが判明(getHighEntropyValues=native、brandsにownプロパティ無し、
+    // window.chrome=無し)。onPageStartedのevaluateJavascriptは新文書に載らないため。
+    // Client Hints は setUserAgentMetadata でネイティブに設定する方式に全面移行した(下記)。
+    // window.chrome はネイティブに追加する手段が無く、JSで関数を足すとCAPTCHAを誘発したため、
+    // 追加しない(無いままでもCAPTCHAは出ないことを実機確認済み)。
 
     // スクショ送信間隔(ms): 操作直後は高速、アイドル時は省電力
     private val CAPTURE_FAST = 150L
@@ -151,6 +109,9 @@ class MainActivity : Activity() {
             // Client Hints は WebViewエンジン由来なので、UAもWebView由来にすれば
             // 「UA と CH のバージョン不一致」(本物Chromeでは起きない)を解消できる。
             val webviewMajor = Regex("Chrome/(\\d+)").find(settings.userAgentString)?.groupValues?.get(1)
+            // フルのビルド番号(例 138.0.7204.179)。高エントロピーCHでは本物Chromeもフル版を返すので合わせる。
+            // UA文字列だけは Reduction で major.0.0.0 に丸める(そちらは全員同じが正解)。
+            val webviewFull = Regex("Chrome/([\\d.]+)").find(settings.userAgentString)?.groupValues?.get(1)
             val installedMajor = try {
                 (packageManager.getPackageInfo("com.android.chrome", 0).versionName)
                     ?.substringBefore('.')
@@ -175,18 +136,20 @@ class MainActivity : Activity() {
             // ため、検出リスクを上げずに直せる唯一の方法。
             if (WebViewFeature.isFeatureSupported(WebViewFeature.USER_AGENT_METADATA)) {
                 try {
-                    fun brand(name: String, ver: String) =
+                    val fullVer = webviewFull ?: "$major.0.0.0"
+                    fun brand(name: String, majorV: String, fullV: String) =
                         UserAgentMetadata.BrandVersion.Builder()
-                            .setBrand(name).setMajorVersion(ver).setFullVersion("$ver.0.0.0").build()
-                    // 本物のChromeと同じ3ブランド構成("Android WebView" を "Google Chrome" に)
+                            .setBrand(name).setMajorVersion(majorV).setFullVersion(fullV).build()
+                    // 本物のChromeと同じ3ブランド構成("Android WebView" を "Google Chrome" に)。
+                    // majorVersion(低エントロピー)は丸めた major、fullVersion(高エントロピー)は実ビルド番号。
                     val brands = listOf(
-                        brand("Not)A;Brand", "8"),
-                        brand("Chromium", major),
-                        brand("Google Chrome", major)
+                        brand("Not)A;Brand", "8", "8.0.0.0"),
+                        brand("Chromium", major, fullVer),
+                        brand("Google Chrome", major, fullVer)
                     )
                     val meta = UserAgentMetadata.Builder()
                         .setBrandVersionList(brands)
-                        .setFullVersion("$major.0.0.0")
+                        .setFullVersion(fullVer)
                         .setPlatform("Android")
                         // 高エントロピーは端末の実値。端末ごとに自然にばらけ、全員同一を避ける。
                         .setPlatformVersion(jsPlatformVersion)
@@ -201,11 +164,6 @@ class MainActivity : Activity() {
             }
 
             webViewClient = object : WebViewClient() {
-                override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
-                    super.onPageStarted(view, url, favicon)
-                    // ページのJSより先にChromeプロパティを偽装
-                    view?.evaluateJavascript(CHROME_SPOOF_JS, null)
-                }
                 override fun onPageFinished(view: WebView?, url: String?) {
                     super.onPageFinished(view, url)
                     // viewport指定が無いサイトはPC幅(980px)で表示されるため、
