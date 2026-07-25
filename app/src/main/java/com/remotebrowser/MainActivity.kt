@@ -229,7 +229,8 @@ class MainActivity : Activity() {
     private fun handleCommand(json: String) {
         lastCommandTime = System.currentTimeMillis()
         val msg = JSONObject(json)
-        when (msg.optString("type")) {
+        val type = msg.optString("type")
+        when (type) {
             "navigate" -> webView.loadUrl(msg.getString("url"))
             "back" -> if (webView.canGoBack()) webView.goBack() else webView.evaluateJavascript("history.back()", null)
             "forward" -> if (webView.canGoForward()) webView.goForward() else webView.evaluateJavascript("history.forward()", null)
@@ -238,17 +239,67 @@ class MainActivity : Activity() {
             "input_text" -> commitText(msg.getString("text"))     // まとめ入力(カーソル位置に挿入)
             "input_char" -> commitText(msg.getString("char"))     // ライブ入力(本物の入力経路で挿入)
             "key" -> handleKey(msg.optString("key"))
+            // 連続タッチジェスチャー(管理画面のドラッグ=本物のスワイプ)。
+            // 管理側が実マウス速度で touchmove を送るので、間隔=人間の速度=慣性も自然。
+            "touchstart" -> gestureStart(msg.getInt("x"), msg.getInt("y"))
+            "touchmove" -> gestureMove(msg.getInt("x"), msg.getInt("y"))
+            "touchend" -> gestureEnd(msg.getInt("x"), msg.getInt("y"))
             "scroll" -> {
-                // dy 指定(ホイール)を優先、無ければ direction(上下ボタン)で ±500
+                // ホイール/ボタン用のフォールバック(実績のあるJSスクロール)。
                 val dy = if (msg.has("dy")) msg.getInt("dy") else {
                     if (msg.optString("direction") == "up") -500 else 500
                 }
                 webView.evaluateJavascript("window.scrollBy(0, $dy);", null)
             }
         }
-        // 操作の結果をすぐ画面に反映させるため、少し待って即キャプチャ
-        // (定期送信=400msを待たずに反応が見えるので操作感が上がる)
-        handler.postDelayed({ captureAndSend() }, 90)
+        // 操作の結果をすぐ画面に反映。touchmove は毎秒数十回来るので即キャプチャは省き、
+        // 定期キャプチャ(操作中は150ms)に任せる(フラッド防止)。
+        if (type != "touchmove") {
+            handler.postDelayed({ captureAndSend() }, 90)
+        }
+    }
+
+    // ---- 連続タッチジェスチャー ----
+    // down は最初の1回、以降の move は同じ downTime・eventTime=到着時刻で流す。
+    // eventTime が実時間なので velocity が人間相当になり、離すと自然な慣性スクロールになる。
+    private var gestureDownTime = 0L
+    private var gestureActive = false
+    private var lastGestureX = 0f
+    private var lastGestureY = 0f
+    private val gestureTimeout = Runnable {
+        // touchend が届かないまま放置された時の保険(WS切断など)
+        if (gestureActive) {
+            val now = SystemClock.uptimeMillis()
+            val ev = MotionEvent.obtain(gestureDownTime, now, MotionEvent.ACTION_CANCEL, lastGestureX, lastGestureY, 0)
+            webView.dispatchTouchEvent(ev); ev.recycle()
+            gestureActive = false
+        }
+    }
+    private fun dispatchTouch(action: Int, x: Float, y: Float) {
+        val now = SystemClock.uptimeMillis()
+        val ev = MotionEvent.obtain(gestureDownTime, now, action, x, y, 0)
+        webView.dispatchTouchEvent(ev); ev.recycle()
+    }
+    private fun gestureStart(x: Int, y: Int) {
+        if (gestureActive) dispatchTouch(MotionEvent.ACTION_CANCEL, lastGestureX, lastGestureY)
+        gestureDownTime = SystemClock.uptimeMillis()
+        lastGestureX = x.toFloat(); lastGestureY = y.toFloat()
+        gestureActive = true
+        dispatchTouch(MotionEvent.ACTION_DOWN, lastGestureX, lastGestureY)
+        handler.removeCallbacks(gestureTimeout); handler.postDelayed(gestureTimeout, 2500)
+    }
+    private fun gestureMove(x: Int, y: Int) {
+        if (!gestureActive) return
+        lastGestureX = x.toFloat(); lastGestureY = y.toFloat()
+        dispatchTouch(MotionEvent.ACTION_MOVE, lastGestureX, lastGestureY)
+        handler.removeCallbacks(gestureTimeout); handler.postDelayed(gestureTimeout, 2500)
+    }
+    private fun gestureEnd(x: Int, y: Int) {
+        if (!gestureActive) return
+        lastGestureX = x.toFloat(); lastGestureY = y.toFloat()
+        dispatchTouch(MotionEvent.ACTION_UP, lastGestureX, lastGestureY)
+        gestureActive = false
+        handler.removeCallbacks(gestureTimeout)
     }
 
     // 本物のタッチをWebViewに送る。JSの疑似クリックと違い、WebViewが
