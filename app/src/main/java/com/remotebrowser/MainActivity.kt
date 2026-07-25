@@ -53,8 +53,29 @@ class MainActivity : Activity() {
         (function(){
             // window.chrome: 存在チェックだけ通ればよいので最小構造
             // 関数を大量に作るとパッチ検出スコアが上がるので、オブジェクトだけ
-            if(!window.chrome){
-                window.chrome={runtime:{},app:{isInstalled:false},csi:null,loadTimes:null};
+            // 本物のChromeでは chrome.loadTimes / chrome.csi は「関数」、runtimeにも実体がある。
+            // null や空だと検知スクリプトに「WebView/改造」とバレるので、本物同様に整える。
+            if(!window.chrome){window.chrome={};}
+            if(!window.chrome.app){
+                window.chrome.app={isInstalled:false,
+                    InstallState:{DISABLED:'disabled',INSTALLED:'installed',NOT_INSTALLED:'not_installed'},
+                    RunningState:{CANNOT_RUN:'cannot_run',READY_TO_RUN:'ready_to_run',RUNNING:'running'},
+                    getDetails:function(){return null;},getIsInstalled:function(){return false;}};
+            }
+            if(!window.chrome.runtime){
+                window.chrome.runtime={
+                    OnInstalledReason:{CHROME_UPDATE:'chrome_update',INSTALL:'install',SHARED_MODULE_UPDATE:'shared_module_update',UPDATE:'update'},
+                    OnRestartRequiredReason:{APP_UPDATE:'app_update',OS_UPDATE:'os_update',PERIODIC:'periodic'},
+                    PlatformArch:{ARM:'arm',ARM64:'arm64',X86_32:'x86-32',X86_64:'x86-64'},
+                    PlatformOs:{ANDROID:'android',CROS:'cros',LINUX:'linux',MAC:'mac',WIN:'win'},
+                    connect:function(){return {onMessage:{addListener:function(){}},postMessage:function(){},disconnect:function(){}};},
+                    sendMessage:function(){}};
+            }
+            if(typeof window.chrome.csi!=='function'){
+                window.chrome.csi=function(){return {startE:Date.now(),onloadT:Date.now(),pageT:Date.now(),tran:15};};
+            }
+            if(typeof window.chrome.loadTimes!=='function'){
+                window.chrome.loadTimes=function(){var t=Date.now()/1000;return {requestTime:t-1,startLoadTime:t-1,commitLoadTime:t-0.9,finishDocumentLoadTime:t-0.5,finishLoadTime:t-0.3,firstPaintTime:t-0.4,firstPaintAfterLoadTime:0,navigationType:'Other',wasFetchedViaSpdy:true,wasNpnNegotiated:true,npnNegotiatedProtocol:'h2',wasAlternateProtocolAvailable:false,connectionInfo:'h2'};};
             }
 
             // Client Hints: brands の "Android WebView" → "Google Chrome" に置換
@@ -127,6 +148,13 @@ class MainActivity : Activity() {
             // (例 138.0.0.0)。全Chromeが同じ値を名乗るので目立たない。
             // フルの4桁バージョン(例 138.0.7204.179)を出すと逆に珍しい値=指紋が濃くなる。
             // そのため端末のChromeからメジャー番号だけ取り、残りは 0.0.0 に固定する。
+            //
+            // 重要(FP整合): Client Hints の brands/fullVersionList は「System WebView エンジン」の
+            // バージョンから来る。UAを「インストール済みChromeアプリ」のバージョンで作ると、
+            // WebViewとChromeアプリが別バージョンの端末で UA と Client Hints がズレて、
+            // 本物のChromeでは絶対に起きない不一致=検知の手がかりになる。
+            // よって UA は WebView自身のバージョン(= CHと同じ出所)を最優先で使う。
+            val webviewMajor = Regex("Chrome/(\\d+)").find(settings.userAgentString)?.groupValues?.get(1)
             val installedMajor = try {
                 (packageManager.getPackageInfo("com.android.chrome", 0).versionName)
                     ?.substringBefore('.')
@@ -134,8 +162,7 @@ class MainActivity : Activity() {
                 try { (packageManager.getPackageInfo("com.chrome.beta", 0).versionName)?.substringBefore('.') }
                 catch (_: Exception) { null }
             }
-            val webviewMajor = Regex("Chrome/(\\d+)").find(settings.userAgentString)?.groupValues?.get(1)
-            val major = installedMajor ?: webviewMajor ?: "138"
+            val major = webviewMajor ?: installedMajor ?: "138"
             settings.userAgentString =
                 "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) " +
                 "Chrome/$major.0.0.0 Mobile Safari/537.36"
@@ -225,7 +252,9 @@ class MainActivity : Activity() {
                 val dy = if (msg.has("dy")) msg.getInt("dy") else {
                     if (msg.optString("direction") == "up") -500 else 500
                 }
-                webView.evaluateJavascript("window.scrollBy(0, $dy);", null)
+                // JSの window.scrollBy だと touch イベントが出ず「指なしスクロール」で
+                // WebView/自動化とバレる。本物のタッチ(MotionEventドラッグ)で送る。
+                simulateScrollTouch(dy)
             }
         }
         // 操作の結果をすぐ画面に反映させるため、少し待って即キャプチャ
@@ -262,6 +291,46 @@ class MainActivity : Activity() {
                 })();
             """) { result -> sendEditableState(result?.contains("true") == true) }
         }, 120)
+    }
+
+    // 本物のタッチによるスクロール。JSの window.scrollBy と違い、
+    // touchstart/touchmove/touchend が発火し、ネイティブに慣性なしでスクロールする。
+    // dy>0 = 下方向スクロール(scrollBy(0,+dy)相当 = 指を上へスワイプ)。
+    private fun simulateScrollTouch(dy: Int) {
+        val w = webView.width; val h = webView.height
+        if (w <= 0 || h <= 0 || dy == 0) return
+        val cx = w / 2f
+        val maxTravel = h * 0.6f
+        var remaining = dy.toFloat()
+        var guard = 0
+        while (kotlin.math.abs(remaining) > 1f && guard < 6) {
+            guard++
+            val travel = remaining.coerceIn(-maxTravel, maxTravel)
+            // 下スクロール(travel>0)は画面下側から上へ、上スクロールは上側から下へ指を動かす
+            val startY = if (travel > 0) h * 0.75f else h * 0.25f
+            val endY = startY - travel
+            dispatchSwipe(cx, startY, endY)
+            remaining -= travel
+        }
+    }
+
+    private fun dispatchSwipe(cx: Float, startY: Float, endY: Float) {
+        val t0 = SystemClock.uptimeMillis()
+        val down = MotionEvent.obtain(t0, t0, MotionEvent.ACTION_DOWN, cx, startY, 0)
+        webView.dispatchTouchEvent(down); down.recycle()
+        val steps = 8
+        for (i in 1..steps) {
+            val tt = t0 + i * 5L
+            val y = startY + (endY - startY) * i / steps
+            val mv = MotionEvent.obtain(t0, tt, MotionEvent.ACTION_MOVE, cx, y, 0)
+            webView.dispatchTouchEvent(mv); mv.recycle()
+        }
+        // フリング(慣性)防止: 最後に同じ位置で少し留めて指の速度を0にしてから離す
+        val holdT = t0 + steps * 5L + 30L
+        val hold = MotionEvent.obtain(t0, holdT, MotionEvent.ACTION_MOVE, cx, endY, 0)
+        webView.dispatchTouchEvent(hold); hold.recycle()
+        val up = MotionEvent.obtain(t0, holdT + 10L, MotionEvent.ACTION_UP, cx, endY, 0)
+        webView.dispatchTouchEvent(up); up.recycle()
     }
 
     // 入力欄にフォーカスがあるかを管理画面へ通知
