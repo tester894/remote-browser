@@ -329,10 +329,22 @@ class MainActivity : Activity() {
                     } else if(el.isContentEditable){
                         document.execCommand('insertLineBreak');
                     } else {
+                        // 送信前に、今見えているDOMの値を framework の内部状態にも反映させる。
+                        // React等の制御入力は「見えている文字」と「内部状態」が別で、
+                        // 検索後ページでは内部状態が空のことがある→そのままEnterすると
+                        // 空検索になり文字が消える(2回目のEnterで消える現象)。
+                        // 値を入れ直して input を発火し、内部状態を見えている値に合わせる。
+                        if(el.tagName==='INPUT' || el.tagName==='TEXTAREA'){
+                            try{
+                                var proto = (el.tagName==='TEXTAREA') ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
+                                var setter = Object.getOwnPropertyDescriptor(proto,'value');
+                                if(setter && setter.set) setter.set.call(el, el.value);
+                                el.dispatchEvent(new Event('input',{bubbles:true}));
+                            }catch(_){}
+                        }
                         // 検索欄はほぼフォーム内。フォームがあれば「本物の送信」を優先する。
                         // 合成keydownを先に投げるとサイトが自前のEnter処理(ページ内検索)で
                         // 入力を空扱いにして文字を消し、画面遷移もしない=戻るも効かなくなる。
-                        // そのためフォーム送信を優先し、DOMの値でそのまま検索させる。
                         var form = el.form || (el.closest ? el.closest('form') : null);
                         if(form){
                             try{ if(form.requestSubmit){ form.requestSubmit(); } else { form.submit(); } }
