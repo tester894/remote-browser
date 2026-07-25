@@ -252,9 +252,14 @@ class MainActivity : Activity() {
                 val dy = if (msg.has("dy")) msg.getInt("dy") else {
                     if (msg.optString("direction") == "up") -500 else 500
                 }
-                // JSの window.scrollBy だと touch イベントが出ず「指なしスクロール」で
-                // WebView/自動化とバレる。本物のタッチ(MotionEventドラッグ)で送る。
-                simulateScrollTouch(dy)
+                // 【重要・戻した経緯】ここを本物のMotionEventドラッグにしたら、
+                // Googleに「通常と異なるトラフィック」判定(CAPTCHA)を食らった。
+                // 理由: 管理画面のドラッグは毎フレーム(約60回/秒)scrollを送る。
+                // 1回ごとに down+move×8+up を撃つと毎秒数百件の合成タッチになり、
+                // しかも1スワイプ50ms・5ms刻み=人間の指では不可能な速度だった。
+                // 「タッチが無い」ことより「人間離れしたタッチ」の方が遥かに目立つ。
+                // 実績のあるJSスクロールに戻す。touchイベントは出ないが実害は出ていない。
+                webView.evaluateJavascript("window.scrollBy(0, $dy);", null)
             }
         }
         // 操作の結果をすぐ画面に反映させるため、少し待って即キャプチャ
@@ -293,45 +298,6 @@ class MainActivity : Activity() {
         }, 120)
     }
 
-    // 本物のタッチによるスクロール。JSの window.scrollBy と違い、
-    // touchstart/touchmove/touchend が発火し、ネイティブに慣性なしでスクロールする。
-    // dy>0 = 下方向スクロール(scrollBy(0,+dy)相当 = 指を上へスワイプ)。
-    private fun simulateScrollTouch(dy: Int) {
-        val w = webView.width; val h = webView.height
-        if (w <= 0 || h <= 0 || dy == 0) return
-        val cx = w / 2f
-        val maxTravel = h * 0.6f
-        var remaining = dy.toFloat()
-        var guard = 0
-        while (kotlin.math.abs(remaining) > 1f && guard < 6) {
-            guard++
-            val travel = remaining.coerceIn(-maxTravel, maxTravel)
-            // 下スクロール(travel>0)は画面下側から上へ、上スクロールは上側から下へ指を動かす
-            val startY = if (travel > 0) h * 0.75f else h * 0.25f
-            val endY = startY - travel
-            dispatchSwipe(cx, startY, endY)
-            remaining -= travel
-        }
-    }
-
-    private fun dispatchSwipe(cx: Float, startY: Float, endY: Float) {
-        val t0 = SystemClock.uptimeMillis()
-        val down = MotionEvent.obtain(t0, t0, MotionEvent.ACTION_DOWN, cx, startY, 0)
-        webView.dispatchTouchEvent(down); down.recycle()
-        val steps = 8
-        for (i in 1..steps) {
-            val tt = t0 + i * 5L
-            val y = startY + (endY - startY) * i / steps
-            val mv = MotionEvent.obtain(t0, tt, MotionEvent.ACTION_MOVE, cx, y, 0)
-            webView.dispatchTouchEvent(mv); mv.recycle()
-        }
-        // フリング(慣性)防止: 最後に同じ位置で少し留めて指の速度を0にしてから離す
-        val holdT = t0 + steps * 5L + 30L
-        val hold = MotionEvent.obtain(t0, holdT, MotionEvent.ACTION_MOVE, cx, endY, 0)
-        webView.dispatchTouchEvent(hold); hold.recycle()
-        val up = MotionEvent.obtain(t0, holdT + 10L, MotionEvent.ACTION_UP, cx, endY, 0)
-        webView.dispatchTouchEvent(up); up.recycle()
-    }
 
     // 入力欄にフォーカスがあるかを管理画面へ通知
     private fun sendEditableState(editable: Boolean) {
