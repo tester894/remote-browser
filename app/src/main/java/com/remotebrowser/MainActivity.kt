@@ -203,8 +203,8 @@ class MainActivity : Activity() {
         val msg = JSONObject(json)
         when (msg.optString("type")) {
             "navigate" -> webView.loadUrl(msg.getString("url"))
-            "back" -> if (webView.canGoBack()) webView.goBack()
-            "forward" -> if (webView.canGoForward()) webView.goForward()
+            "back" -> if (webView.canGoBack()) webView.goBack() else webView.evaluateJavascript("history.back()", null)
+            "forward" -> if (webView.canGoForward()) webView.goForward() else webView.evaluateJavascript("history.forward()", null)
             "refresh" -> webView.reload()
             "tap" -> simulateTap(msg.getInt("x"), msg.getInt("y"))
             "input_text" -> injectText(msg.getString("text"))     // 全置換(入力ボックス用)
@@ -329,13 +329,18 @@ class MainActivity : Activity() {
                     } else if(el.isContentEditable){
                         document.execCommand('insertLineBreak');
                     } else {
-                        ['keydown','keypress','keyup'].forEach(function(t){
-                            el.dispatchEvent(new KeyboardEvent(t,{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true,cancelable:true}));
-                        });
+                        // 検索欄はほぼフォーム内。フォームがあれば「本物の送信」を優先する。
+                        // 合成keydownを先に投げるとサイトが自前のEnter処理(ページ内検索)で
+                        // 入力を空扱いにして文字を消し、画面遷移もしない=戻るも効かなくなる。
+                        // そのためフォーム送信を優先し、DOMの値でそのまま検索させる。
                         var form = el.form || (el.closest ? el.closest('form') : null);
                         if(form){
                             try{ if(form.requestSubmit){ form.requestSubmit(); } else { form.submit(); } }
                             catch(e){ try{ form.submit(); }catch(_){} }
+                        } else {
+                            ['keydown','keypress','keyup'].forEach(function(t){
+                                el.dispatchEvent(new KeyboardEvent(t,{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true,cancelable:true}));
+                            });
                         }
                     }
                 })();
