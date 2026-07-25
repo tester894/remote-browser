@@ -18,6 +18,9 @@ import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
 import android.webkit.*
 import android.widget.FrameLayout
+import androidx.webkit.UserAgentMetadata
+import androidx.webkit.WebSettingsCompat
+import androidx.webkit.WebViewFeature
 import okhttp3.*
 import okio.ByteString
 import java.io.ByteArrayOutputStream
@@ -159,6 +162,43 @@ class MainActivity : Activity() {
             settings.userAgentString =
                 "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) " +
                 "Chrome/$major.0.0.0 Mobile Safari/537.36"
+
+            // ---- Client Hints をネイティブに設定(JS改ざんではない正攻法) ----
+            // 実測で判明: CHROME_SPOOF_JS の Client Hints 偽装は
+            // onPageStarted の evaluateJavascript では新しい文書に載らず一度も効いていなかった
+            // (getHighEntropyValues が native のまま / brands に own プロパティ無し)。
+            // その結果 brands に "Android WebView" が残り、mobile も false のままだった。
+            //
+            // setUserAgentMetadata は JS の書き換えと違い、
+            //   ・navigator.userAgentData と sec-ch-ua ヘッダーの両方に効く
+            //   ・JSの改ざん痕跡(getterやtoString)が一切残らない
+            // ため、検出リスクを上げずに直せる唯一の方法。
+            if (WebViewFeature.isFeatureSupported(WebViewFeature.USER_AGENT_METADATA)) {
+                try {
+                    fun brand(name: String, ver: String) =
+                        UserAgentMetadata.BrandVersion.Builder()
+                            .setBrand(name).setMajorVersion(ver).setFullVersion("$ver.0.0.0").build()
+                    // 本物のChromeと同じ3ブランド構成("Android WebView" を "Google Chrome" に)
+                    val brands = listOf(
+                        brand("Not)A;Brand", "8"),
+                        brand("Chromium", major),
+                        brand("Google Chrome", major)
+                    )
+                    val meta = UserAgentMetadata.Builder()
+                        .setBrandVersionList(brands)
+                        .setFullVersion("$major.0.0.0")
+                        .setPlatform("Android")
+                        // 高エントロピーは端末の実値。端末ごとに自然にばらけ、全員同一を避ける。
+                        .setPlatformVersion(jsPlatformVersion)
+                        .setModel(jsModel)
+                        .setArchitecture("")          // Androidの本物Chromeは空を返す
+                        .setMobile(true)              // UAが Mobile なので true が正。falseだと矛盾
+                        .setBitness(UserAgentMetadata.BITNESS_DEFAULT)
+                        .setWow64(false)
+                        .build()
+                    WebSettingsCompat.setUserAgentMetadata(settings, meta)
+                } catch (_: Exception) { /* 失敗しても既定動作のまま続行 */ }
+            }
 
             webViewClient = object : WebViewClient() {
                 override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {

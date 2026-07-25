@@ -33,4 +33,7 @@ android {
 
 dependencies {
     implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+    // WebSettingsCompat.setUserAgentMetadata でClient Hintsをネイティブに設定するため。
+    // JS改ざんと違い navigator.userAgentData と sec-ch-ua ヘッダーの両方に効き、痕跡も残らない。
+    implementation 'androidx.webkit:webkit:1.11.0'
 }
