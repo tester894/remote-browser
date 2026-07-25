@@ -8,9 +8,14 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.provider.Settings
+import android.view.KeyEvent
+import android.view.MotionEvent
 import android.view.PixelCopy
 import android.view.View
+import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputConnection
 import android.webkit.*
 import android.widget.FrameLayout
 import okhttp3.*
@@ -21,7 +26,7 @@ import org.json.JSONObject
 
 class MainActivity : Activity() {
 
-    private lateinit var webView: WebView
+    private lateinit var webView: RemoteWebView
     private var ws: WebSocket? = null
     private val handler = Handler(Looper.getMainLooper())
 
@@ -90,11 +95,12 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
 
         // WebView をフルスクリーンで表示。
-        // ソフトキーボード(IME)を出さない専用WebViewを使う。
-        // 入力はすべて管理画面から送るため、スマホ側でIMEが出ると
-        // (1)クリックのたびに画面描画が切り替わりスクショが乱れる/消える
-        // (2)IMEが文字編集を握りBackspace等が打ち消される、という不具合になる。
-        webView = NoImeWebView(this).apply {
+        // 本物の入力経路(InputConnection / KeyEvent / MotionEvent)を使うため、
+        // 通常のWebViewを使い、InputConnectionの参照を保持する専用サブクラスにする。
+        // これで本物のカーソル・カーソル位置・サイト内部状態の同期が得られる。
+        // ソフトキーボードはおばあちゃんの画面に出るが、Manifestの adjustNothing で
+        // WebViewは縮まず、管理画面のPixelCopyスクショにもIMEは写らない(別ウィンドウ)。
+        webView = RemoteWebView(this).apply {
             // API 26 未満は PixelCopy が使えないため、draw() で撮る。
             // その場合ハードウェア描画だとスクロール後に白抜けするので、
             // 古い端末だけソフトウェアレイヤーにする。
@@ -207,8 +213,8 @@ class MainActivity : Activity() {
             "forward" -> if (webView.canGoForward()) webView.goForward() else webView.evaluateJavascript("history.forward()", null)
             "refresh" -> webView.reload()
             "tap" -> simulateTap(msg.getInt("x"), msg.getInt("y"))
-            "input_text" -> injectText(msg.getString("text"))     // 全置換(入力ボックス用)
-            "input_char" -> insertAtCaret(msg.getString("char"))  // ライブ入力(カーソル位置に挿入)
+            "input_text" -> commitText(msg.getString("text"))     // まとめ入力(カーソル位置に挿入)
+            "input_char" -> commitText(msg.getString("char"))     // ライブ入力(本物の入力経路で挿入)
             "key" -> handleKey(msg.optString("key"))
             "scroll" -> {
                 // dy 指定(ホイール)を優先、無ければ direction(上下ボタン)で ±500
@@ -223,37 +229,35 @@ class MainActivity : Activity() {
         handler.postDelayed({ captureAndSend() }, 90)
     }
 
-    // JavaScript経由でタップをシミュレート。
-    // タップ後に「入力欄にフォーカスが入ったか」を判定して管理画面に返す
-    // (管理画面はこれを見てカーソル形状=入力モードを切り替える)
+    // 本物のタッチをWebViewに送る。JSの疑似クリックと違い、WebViewが
+    // ネイティブに入力欄をフォーカスし、押した位置に本物のカーソルを表示する。
+    // x,y はスクショ(=WebViewのピクセル)座標なので、そのままView座標として使える。
     private fun simulateTap(x: Int, y: Int) {
-        val density = resources.displayMetrics.density
-        val cssX = (x / density).toInt()
-        val cssY = (y / density).toInt()
-        webView.evaluateJavascript("""
-            (function() {
-                var el = document.elementFromPoint($cssX, $cssY);
-                if (!el) return 'false';
-                ['mousedown','mouseup','click'].forEach(function(t){
-                    el.dispatchEvent(new MouseEvent(t, {bubbles:true, cancelable:true, view:window, clientX:$cssX, clientY:$cssY}));
-                });
-                if (typeof el.focus === 'function') el.focus();
-                var a = document.activeElement;
-                if (!a) return 'false';
-                var tag = a.tagName;
-                if (a.isContentEditable) return 'true';
-                if (tag === 'TEXTAREA') return 'true';
-                if (tag === 'INPUT') {
-                    var t = (a.type || 'text').toLowerCase();
-                    var noText = ['checkbox','radio','button','submit','reset','file','image','range','color'];
-                    return noText.indexOf(t) === -1 ? 'true' : 'false';
-                }
-                return 'false';
-            })();
-        """) { result ->
-            val editable = result?.contains("true") == true
-            sendEditableState(editable)
-        }
+        val now = SystemClock.uptimeMillis()
+        val fx = x.toFloat(); val fy = y.toFloat()
+        val down = MotionEvent.obtain(now, now, MotionEvent.ACTION_DOWN, fx, fy, 0)
+        val up = MotionEvent.obtain(now, now + 40, MotionEvent.ACTION_UP, fx, fy, 0)
+        webView.dispatchTouchEvent(down)
+        webView.dispatchTouchEvent(up)
+        down.recycle(); up.recycle()
+        // タップ後に「入力欄にフォーカスが入ったか」を判定して管理画面に返す
+        // (管理画面はこれを見てカーソル形状=入力モードを切り替える)
+        handler.postDelayed({
+            webView.evaluateJavascript("""
+                (function(){
+                    var a=document.activeElement; if(!a) return 'false';
+                    var tag=a.tagName;
+                    if(a.isContentEditable) return 'true';
+                    if(tag==='TEXTAREA') return 'true';
+                    if(tag==='INPUT'){
+                        var t=(a.type||'text').toLowerCase();
+                        var noText=['checkbox','radio','button','submit','reset','file','image','range','color'];
+                        return noText.indexOf(t)===-1 ? 'true' : 'false';
+                    }
+                    return 'false';
+                })();
+            """) { result -> sendEditableState(result?.contains("true") == true) }
+        }, 120)
     }
 
     // 入力欄にフォーカスがあるかを管理画面へ通知
@@ -265,179 +269,46 @@ class MainActivity : Activity() {
         ws?.send(json.toString())
     }
 
-    // 全置換入力(入力ボックスからの一括入力)
-    private fun injectText(text: String) {
-        val t = esc(text)
-        webView.evaluateJavascript("""
-            (function() {
-                var el = document.activeElement;
-                if (!el) return;
-                var tag = el.tagName;
-                if (tag === 'INPUT' || tag === 'TEXTAREA') {
-                    var proto = (tag === 'TEXTAREA') ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
-                    var setter = Object.getOwnPropertyDescriptor(proto, 'value');
-                    if (setter && setter.set) setter.set.call(el, '$t'); else el.value = '$t';
-                    el.dispatchEvent(new Event('input', { bubbles: true }));
-                    el.dispatchEvent(new Event('change', { bubbles: true }));
-                } else if (el.isContentEditable) {
-                    el.textContent = '$t';
-                    el.dispatchEvent(new Event('input', { bubbles: true }));
-                }
-            })();
-        """, null)
+    // 文字入力: WebViewの本物の入力経路(InputConnection.commitText)で
+    // 現在のカーソル位置に挿入する。日本語もOK、サイト内部の状態も正しく更新される。
+    // (JSでのvalue書き換えと違い、カーソル位置・制御コンポーネントの状態が壊れない)
+    private fun commitText(text: String) {
+        val ic = webView.inputConnection ?: return
+        try { ic.commitText(text, 1) } catch (_: Exception) {}
     }
 
-    // ライブ入力: カーソル位置に文字列を挿入
-    private fun insertAtCaret(text: String) {
-        val t = esc(text)
-        webView.evaluateJavascript("""
-            (function(t) {
-                var el = document.activeElement;
-                if (!el) return;
-                var tag = el.tagName;
-                if (tag === 'INPUT' || tag === 'TEXTAREA') {
-                    var s = el.selectionStart, e = el.selectionEnd, v = el.value;
-                    if (s == null) { s = v.length; e = v.length; }
-                    var nv = v.slice(0, s) + t + v.slice(e);
-                    var proto = (tag === 'TEXTAREA') ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
-                    var setter = Object.getOwnPropertyDescriptor(proto, 'value');
-                    if (setter && setter.set) setter.set.call(el, nv); else el.value = nv;
-                    var p = s + t.length;
-                    try { el.selectionStart = el.selectionEnd = p; } catch(_) {}
-                    el.dispatchEvent(new Event('input', { bubbles: true }));
-                } else if (el.isContentEditable) {
-                    document.execCommand('insertText', false, t);
-                }
-            })('$t');
-        """, null)
-    }
-
-    // 個別キー処理
+    // 個別キー: 本物のキーイベントを送る。物理キーボードと全く同じ挙動になる。
+    // Enterはinputなら送信/textareaなら改行をWebViewが自動で判断する。
     private fun handleKey(key: String) {
-        val js = when (key) {
-            "Enter" -> """
-                (function(){
-                    var el=document.activeElement; if(!el) return;
-                    var tag=el.tagName;
-                    if(tag==='TEXTAREA'){
-                        var s=el.selectionStart,e=el.selectionEnd,v=el.value;
-                        var nv=v.slice(0,s)+'\n'+v.slice(e);
-                        var setter=Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype,'value');
-                        if(setter&&setter.set) setter.set.call(el,nv); else el.value=nv;
-                        try{el.selectionStart=el.selectionEnd=s+1;}catch(_){}
-                        el.dispatchEvent(new Event('input',{bubbles:true}));
-                    } else if(el.isContentEditable){
-                        document.execCommand('insertLineBreak');
-                    } else {
-                        // 送信前に、今見えているDOMの値を framework の内部状態にも反映させる。
-                        // React等の制御入力は「見えている文字」と「内部状態」が別で、
-                        // 検索後ページでは内部状態が空のことがある→そのままEnterすると
-                        // 空検索になり文字が消える(2回目のEnterで消える現象)。
-                        // 値を入れ直して input を発火し、内部状態を見えている値に合わせる。
-                        if(el.tagName==='INPUT' || el.tagName==='TEXTAREA'){
-                            try{
-                                var proto = (el.tagName==='TEXTAREA') ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
-                                var setter = Object.getOwnPropertyDescriptor(proto,'value');
-                                if(setter && setter.set) setter.set.call(el, el.value);
-                                el.dispatchEvent(new Event('input',{bubbles:true}));
-                            }catch(_){}
-                        }
-                        // 検索欄はほぼフォーム内。フォームがあれば「本物の送信」を優先する。
-                        // 合成keydownを先に投げるとサイトが自前のEnter処理(ページ内検索)で
-                        // 入力を空扱いにして文字を消し、画面遷移もしない=戻るも効かなくなる。
-                        var form = el.form || (el.closest ? el.closest('form') : null);
-                        if(form){
-                            try{ if(form.requestSubmit){ form.requestSubmit(); } else { form.submit(); } }
-                            catch(e){ try{ form.submit(); }catch(_){} }
-                        } else {
-                            ['keydown','keypress','keyup'].forEach(function(t){
-                                el.dispatchEvent(new KeyboardEvent(t,{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true,cancelable:true}));
-                            });
-                        }
-                    }
-                })();
-            """
-            "Backspace" -> deleteJs(true)
-            "Delete" -> deleteJs(false)
-            "ArrowLeft" -> moveCaretJs(-1)
-            "ArrowRight" -> moveCaretJs(1)
-            "Home" -> homeEndJs(true)
-            "End" -> homeEndJs(false)
-            "Tab" -> """
-                (function(){
-                    var el=document.activeElement;
-                    var f=Array.prototype.slice.call(document.querySelectorAll('input,textarea,select,button,a[href],[tabindex]'))
-                        .filter(function(x){return !x.disabled && x.offsetParent!==null;});
-                    var i=f.indexOf(el);
-                    if(i>=0 && i+1<f.length){ f[i+1].focus(); }
-                    else if(f.length){ f[0].focus(); }
-                })();
-            """
-            "ArrowUp", "ArrowDown" -> """
-                (function(){
-                    var el=document.activeElement||document.body;
-                    ['keydown','keyup'].forEach(function(t){
-                        el.dispatchEvent(new KeyboardEvent(t,{key:'$key',code:'$key',bubbles:true,cancelable:true}));
-                    });
-                })();
-            """
+        val code = when (key) {
+            "Enter" -> KeyEvent.KEYCODE_ENTER
+            "Backspace" -> KeyEvent.KEYCODE_DEL
+            "Delete" -> KeyEvent.KEYCODE_FORWARD_DEL
+            "ArrowLeft" -> KeyEvent.KEYCODE_DPAD_LEFT
+            "ArrowRight" -> KeyEvent.KEYCODE_DPAD_RIGHT
+            "ArrowUp" -> KeyEvent.KEYCODE_DPAD_UP
+            "ArrowDown" -> KeyEvent.KEYCODE_DPAD_DOWN
+            "Home" -> KeyEvent.KEYCODE_MOVE_HOME
+            "End" -> KeyEvent.KEYCODE_MOVE_END
+            "Tab" -> KeyEvent.KEYCODE_TAB
             else -> return
         }
-        webView.evaluateJavascript(js, null)
+        sendKey(code)
     }
 
-    private fun deleteJs(back: Boolean): String = """
-        (function(){
-            var el=document.activeElement; if(!el) return;
-            var tag=el.tagName;
-            if(tag==='INPUT'||tag==='TEXTAREA'){
-                var s=el.selectionStart, e=el.selectionEnd, v=el.value;
-                if(s==null){
-                    // 選択位置が取れない入力欄は末尾/先頭を削るフォールバック
-                    if($back) el.value=String(v).slice(0,-1); else el.value=String(v).slice(1);
-                    el.dispatchEvent(new Event('input',{bubbles:true}));
-                    return;
-                }
-                var ns, np;
-                if(s!==e){ ns=v.slice(0,s)+v.slice(e); np=s; }
-                else if($back){ if(s===0) return; ns=v.slice(0,s-1)+v.slice(e); np=s-1; }
-                else { if(s>=v.length) return; ns=v.slice(0,s)+v.slice(e+1); np=s; }
-                var proto=(tag==='TEXTAREA')?window.HTMLTextAreaElement.prototype:window.HTMLInputElement.prototype;
-                var setter=Object.getOwnPropertyDescriptor(proto,'value');
-                if(setter&&setter.set) setter.set.call(el,ns); else el.value=ns;
-                try{el.selectionStart=el.selectionEnd=np;}catch(_){}
-                el.dispatchEvent(new Event('input',{bubbles:true}));
-            } else if(el.isContentEditable){
-                document.execCommand($back?'delete':'forwardDelete',false,null);
-            }
-        })();
-    """
-
-    private fun moveCaretJs(delta: Int): String = """
-        (function(){
-            var el=document.activeElement; if(!el) return;
-            if(el.tagName==='INPUT'||el.tagName==='TEXTAREA'){
-                var s=el.selectionStart,e=el.selectionEnd,len=el.value.length,p;
-                if(s!==e){ p=($delta<0)? s : e; }
-                else { p=Math.max(0,Math.min(len, s+($delta))); }
-                try{el.selectionStart=el.selectionEnd=p;}catch(_){}
-            }
-        })();
-    """
-
-    private fun homeEndJs(home: Boolean): String = """
-        (function(){
-            var el=document.activeElement; if(!el) return;
-            if(el.tagName==='INPUT'||el.tagName==='TEXTAREA'){
-                var p=$home?0:el.value.length;
-                try{el.selectionStart=el.selectionEnd=p;}catch(_){}
-            }
-        })();
-    """
-
-    // JS文字列リテラル用エスケープ
-    private fun esc(s: String): String =
-        s.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n").replace("\r", "\\r")
+    private fun sendKey(keyCode: Int) {
+        val now = SystemClock.uptimeMillis()
+        val down = KeyEvent(now, now, KeyEvent.ACTION_DOWN, keyCode, 0)
+        val up = KeyEvent(now, now, KeyEvent.ACTION_UP, keyCode, 0)
+        val ic = webView.inputConnection
+        if (ic != null) {
+            // 入力欄にフォーカスがある時は InputConnection 経由で確実にその欄へ送る
+            try { ic.sendKeyEvent(down); ic.sendKeyEvent(up); return } catch (_: Exception) {}
+        }
+        // フォーカスが無い/失敗時はWebViewへ直接(戻る等のグローバルキー用)
+        webView.dispatchKeyEvent(down)
+        webView.dispatchKeyEvent(up)
+    }
 
     // ---- スクリーンショット送信 ----
     private fun startCapture() {
@@ -520,12 +391,15 @@ class MainActivity : Activity() {
     }
 }
 
-// IME(ソフトキーボード)を一切出さないWebView。
-// 入力欄にフォーカスが入っても onCheckIsTextEditor=false / InputConnection=null を返すので
-// Androidはキーボードを表示しない。文字入力は管理画面からJSで注入するため影響なし。
-private class NoImeWebView(context: android.content.Context) : WebView(context) {
-    override fun onCheckIsTextEditor(): Boolean = false
-    override fun onCreateInputConnection(
-        outAttrs: android.view.inputmethod.EditorInfo
-    ): android.view.inputmethod.InputConnection? = null
+// フォーカス中の InputConnection を保持するWebView。
+// 本物の入力経路(commitText / sendKeyEvent)を使うために参照をキャッシュする。
+// これで本物のカーソル・カーソル位置・サイト内部状態の同期が得られる。
+private class RemoteWebView(context: android.content.Context) : WebView(context) {
+    var inputConnection: InputConnection? = null
+        private set
+    override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection? {
+        val ic = super.onCreateInputConnection(outAttrs)
+        if (ic != null) inputConnection = ic
+        return ic
+    }
 }
