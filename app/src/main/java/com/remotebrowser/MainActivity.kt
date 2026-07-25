@@ -106,13 +106,10 @@ class MainActivity : Activity() {
             settings.useWideViewPort = true
             settings.loadWithOverviewMode = true
             settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-            // WebViewマーカー除去 + Chrome UA Reduction適用 + Chromeバージョン合わせ
-            var ua = settings.userAgentString
-                .replace("; wv", "")
-                .replace(Regex("Version/\\d+\\.\\d+\\s*"), "")
-                .replace(Regex("Android \\d+;\\s*[^)]+\\)"), "Android 10; K)")
-            // 端末にインストールされているChromeのバージョンを取得し、
-            // UA内のChrome/xxx部分を差し替える(端末ごとに自動で異なる値になる)
+            // モバイル版サイトを確実に出すため、UAを「モバイルChrome」で明示的に組み立てる。
+            // Android 10; K は Chrome UA Reduction の標準形(WebViewマーカーは含まない)。
+            // 末尾 "Mobile Safari" を必ず残すことで、サイトがモバイル版を返す。
+            // Chromeバージョンは端末のChromeに合わせる(端末ごとに自然に異なる値になる)。
             val chromeVersion = try {
                 packageManager.getPackageInfo("com.android.chrome", 0).versionName
             } catch (_: Exception) {
@@ -121,10 +118,11 @@ class MainActivity : Activity() {
                     packageManager.getPackageInfo("com.chrome.beta", 0).versionName
                 } catch (_: Exception) { null }
             }
-            if (chromeVersion != null) {
-                ua = ua.replace(Regex("Chrome/[\\d.]+"), "Chrome/$chromeVersion")
-            }
-            settings.userAgentString = ua
+            val fallbackVer = Regex("Chrome/([\\d.]+)").find(settings.userAgentString)?.groupValues?.get(1) ?: "120.0.0.0"
+            val ver = chromeVersion ?: fallbackVer
+            settings.userAgentString =
+                "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) " +
+                "Chrome/$ver Mobile Safari/537.36"
 
             webViewClient = object : WebViewClient() {
                 override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
@@ -134,6 +132,15 @@ class MainActivity : Activity() {
                 }
                 override fun onPageFinished(view: WebView?, url: String?) {
                     super.onPageFinished(view, url)
+                    // viewport指定が無いサイトはPC幅(980px)で表示されるため、
+                    // 無い場合だけモバイル幅を補う(既にある指定は尊重する)
+                    view?.evaluateJavascript(
+                        "(function(){if(!document.querySelector('meta[name=viewport]')){" +
+                        "var m=document.createElement('meta');m.name='viewport';" +
+                        "m.content='width=device-width, initial-scale=1';" +
+                        "(document.head||document.documentElement).appendChild(m);}})();",
+                        null
+                    )
                     // 現在のURLを管理画面に通知
                     url?.let { sendCurrentUrl(it) }
                 }
