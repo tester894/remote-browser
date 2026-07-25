@@ -113,20 +113,23 @@ class MainActivity : Activity() {
             // モバイル版サイトを確実に出すため、UAを「モバイルChrome」で明示的に組み立てる。
             // Android 10; K は Chrome UA Reduction の標準形(WebViewマーカーは含まない)。
             // 末尾 "Mobile Safari" を必ず残すことで、サイトがモバイル版を返す。
-            // Chromeバージョンは端末のChromeに合わせる(端末ごとに自然に異なる値になる)。
-            val chromeVersion = try {
-                packageManager.getPackageInfo("com.android.chrome", 0).versionName
+            //
+            // 重要: 本物のChromeは "UA Reduction" でバージョンを メジャー.0.0.0 に丸める
+            // (例 138.0.0.0)。全Chromeが同じ値を名乗るので目立たない。
+            // フルの4桁バージョン(例 138.0.7204.179)を出すと逆に珍しい値=指紋が濃くなる。
+            // そのため端末のChromeからメジャー番号だけ取り、残りは 0.0.0 に固定する。
+            val installedMajor = try {
+                (packageManager.getPackageInfo("com.android.chrome", 0).versionName)
+                    ?.substringBefore('.')
             } catch (_: Exception) {
-                try {
-                    // Samsung等はパッケージ名が違う場合がある
-                    packageManager.getPackageInfo("com.chrome.beta", 0).versionName
-                } catch (_: Exception) { null }
+                try { (packageManager.getPackageInfo("com.chrome.beta", 0).versionName)?.substringBefore('.') }
+                catch (_: Exception) { null }
             }
-            val fallbackVer = Regex("Chrome/([\\d.]+)").find(settings.userAgentString)?.groupValues?.get(1) ?: "120.0.0.0"
-            val ver = chromeVersion ?: fallbackVer
+            val webviewMajor = Regex("Chrome/(\\d+)").find(settings.userAgentString)?.groupValues?.get(1)
+            val major = installedMajor ?: webviewMajor ?: "138"
             settings.userAgentString =
                 "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) " +
-                "Chrome/$ver Mobile Safari/537.36"
+                "Chrome/$major.0.0.0 Mobile Safari/537.36"
 
             webViewClient = object : WebViewClient() {
                 override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
