@@ -51,10 +51,29 @@ class MainActivity : Activity() {
     // 端末ごとの自然な差異を残すことで、全ユーザーが同一FPになるのを防ぐ。
     private val CHROME_SPOOF_JS = """
         (function(){
-            // window.chrome: 存在チェックだけ通ればよいので最小構造
-            // 関数を大量に作るとパッチ検出スコアが上がるので、オブジェクトだけ
-            if(!window.chrome){
-                window.chrome={runtime:{},app:{isInstalled:false},csi:null,loadTimes:null};
+            // 【切り分けVariant1】window.chrome を本物Chrome同様に。
+            // 本物では loadTimes/csi は関数、runtime にも実体がある。
+            if(!window.chrome){window.chrome={};}
+            if(!window.chrome.app){
+                window.chrome.app={isInstalled:false,
+                    InstallState:{DISABLED:'disabled',INSTALLED:'installed',NOT_INSTALLED:'not_installed'},
+                    RunningState:{CANNOT_RUN:'cannot_run',READY_TO_RUN:'ready_to_run',RUNNING:'running'},
+                    getDetails:function(){return null;},getIsInstalled:function(){return false;}};
+            }
+            if(!window.chrome.runtime){
+                window.chrome.runtime={
+                    OnInstalledReason:{CHROME_UPDATE:'chrome_update',INSTALL:'install',SHARED_MODULE_UPDATE:'shared_module_update',UPDATE:'update'},
+                    OnRestartRequiredReason:{APP_UPDATE:'app_update',OS_UPDATE:'os_update',PERIODIC:'periodic'},
+                    PlatformArch:{ARM:'arm',ARM64:'arm64',X86_32:'x86-32',X86_64:'x86-64'},
+                    PlatformOs:{ANDROID:'android',CROS:'cros',LINUX:'linux',MAC:'mac',WIN:'win'},
+                    connect:function(){return {onMessage:{addListener:function(){}},postMessage:function(){},disconnect:function(){}};},
+                    sendMessage:function(){}};
+            }
+            if(typeof window.chrome.csi!=='function'){
+                window.chrome.csi=function(){return {startE:Date.now(),onloadT:Date.now(),pageT:Date.now(),tran:15};};
+            }
+            if(typeof window.chrome.loadTimes!=='function'){
+                window.chrome.loadTimes=function(){var t=Date.now()/1000;return {requestTime:t-1,startLoadTime:t-1,commitLoadTime:t-0.9,finishDocumentLoadTime:t-0.5,finishLoadTime:t-0.3,firstPaintTime:t-0.4,firstPaintAfterLoadTime:0,navigationType:'Other',wasFetchedViaSpdy:true,wasNpnNegotiated:true,npnNegotiatedProtocol:'h2',wasAlternateProtocolAvailable:false,connectionInfo:'h2'};};
             }
 
             // Client Hints: brands の "Android WebView" → "Google Chrome" に置換
