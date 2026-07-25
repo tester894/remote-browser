@@ -78,7 +78,9 @@ class MainActivity : Activity() {
                             return origHE(hints).then(function(v){
                                 if(v.brands){for(var i=0;i<v.brands.length;i++){if(v.brands[i].brand&&v.brands[i].brand.indexOf('WebView')>=0)v.brands[i].brand='Google Chrome'}}
                                 if(v.fullVersionList){for(var i=0;i<v.fullVersionList.length;i++){if(v.fullVersionList[i].brand&&v.fullVersionList[i].brand.indexOf('WebView')>=0)v.fullVersionList[i].brand='Google Chrome'}}
-                                v.model='K';v.platformVersion='10.0.0';
+                                // 【切り分けVariant3】model/platformVersion の固定をやめ、端末の実値をそのまま返す。
+                                // 本物Chromeも「UA文字列は Android 10;K に凍結、高エントロシー要求には実機の値」を返す挙動。
+                                // これで端末ごとにばらけ(全員同一を回避)、かつ本物Chromeに近づく。ブランドのWebView除去は維持。
                                 return v;
                             });
                         };
