@@ -189,6 +189,14 @@ class MainActivity : Activity() {
             webChromeClient = WebChromeClient()
         }
 
+        // Cookie: WebViewは既定でサードパーティCookieを拒否するが、本物のChromeは許可する。
+        // 拒否のままだとCDN/同意バナー/SSO/ログイン維持が壊れ、挙動でも「普通のブラウザでない」
+        // と分かってしまう。ネイティブ設定なのでJS改ざん痕跡はゼロ。
+        try {
+            CookieManager.getInstance().setAcceptCookie(true)
+            CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true)
+        } catch (_: Exception) {}
+
         val layout = FrameLayout(this)
         layout.addView(webView)
         setContentView(layout)
