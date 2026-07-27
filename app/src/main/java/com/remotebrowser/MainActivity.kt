@@ -1,7 +1,9 @@
 package com.remotebrowser
 
+import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Rect
 import android.os.Build
@@ -32,6 +34,8 @@ class MainActivity : Activity() {
     private lateinit var webView: RemoteWebView
     private var ws: WebSocket? = null
     private val handler = Handler(Looper.getMainLooper())
+    private var pendingPermissionRequest: PermissionRequest? = null
+    private companion object { const val RC_CAMERA = 1001 }
 
     // 端末固定ID: ANDROID_ID を使うことで再起動しても同じIDになり、
     // 管理画面側で付けた名前が保持される(取得失敗時のみランダム)
@@ -186,7 +190,19 @@ class MainActivity : Activity() {
                 }
             }
 
-            webChromeClient = WebChromeClient()
+            webChromeClient = object : WebChromeClient() {
+                override fun onPermissionRequest(request: PermissionRequest) {
+                    handler.post {
+                        val cam = Manifest.permission.CAMERA
+                        if (Build.VERSION.SDK_INT >= 23 && checkSelfPermission(cam) != PackageManager.PERMISSION_GRANTED) {
+                            pendingPermissionRequest = request
+                            requestPermissions(arrayOf(cam), RC_CAMERA)
+                        } else {
+                            request.grant(request.resources)
+                        }
+                    }
+                }
+            }
         }
 
         // Cookie: WebViewは既定でサードパーティCookieを拒否するが、本物のChromeは許可する。
@@ -476,6 +492,19 @@ class MainActivity : Activity() {
         ws?.close(1000, "App closed")
         webView.destroy()
         super.onDestroy()
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == RC_CAMERA) {
+            val req = pendingPermissionRequest ?: return
+            pendingPermissionRequest = null
+            if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                req.grant(req.resources)
+            } else {
+                req.deny()
+            }
+        }
     }
 
     override fun onBackPressed() {
